@@ -1,0 +1,51 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ur5e_with_robotiq_hande">
+
+  <!-- ===================== ARGS ===================== -->
+  <!-- Important: ur_description uses $(arg name) internally -->
+  <xacro:arg name="name" default="ur5e_with_robotiq_hande"/>
+  <xacro:arg name="ur_type" default="ur5"/>
+  <xacro:arg name="tf_prefix" default=""/>
+
+  <!-- =================== INCLUDES =================== -->
+  <!-- UR robot model -->
+  <xacro:include filename="$(find ur_description)/urdf/ur.urdf.xacro"/>
+
+  <!-- Robotiq Hand-E model -->
+  <xacro:include filename="$(find robotiq_hande_description)/urdf/robotiq_hande_gripper.xacro"/>
+
+  <!-- ==================== GRIPPER =================== -->
+  <!-- Attach to tool0 (with tf_prefix if used) -->
+  <xacro:robotiq_hande_gripper
+    name="hande_system"
+    prefix=""
+    parent="$(arg tf_prefix)tool0"
+    grip_pos_min="0.0"
+    grip_pos_max="0.025"
+    tty_port="/dev/ttyUSB0"
+    baudrate="115200"
+    parity="N"
+    data_bits="8"
+    stop_bit="1"
+    slave_id="9"
+    use_fake_hardware="true"
+    frequency_hz="10"
+    xyz="0 0 0"
+    rpy="0 0 0"
+  />
+
+
+  <!-- ==================== TCP LINK ================== -->
+  <!-- Virtual EE link for planners (TCP) -->
+  <link name="$(arg tf_prefix)virtual_ee_link"/>
+
+  <joint name="$(arg tf_prefix)virtual_ee_joint" type="fixed">
+    <parent link="$(arg tf_prefix)tool0"/>
+    <child link="$(arg tf_prefix)virtual_ee_link"/>
+    <!-- Adjust TCP offset as needed -->
+    <origin xyz="0.0 0.0 0.157" rpy="0.0 0.0 0.0"/>
+  </joint>
+
+
+  
+</robot>
