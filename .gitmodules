@@ -1,0 +1,18 @@
+[submodule "src/Universal_Robots_Client_Library"]
+	path = src/Universal_Robots_Client_Library
+	url = https://github.com/UniversalRobots/Universal_Robots_Client_Library.git
+[submodule "src/Universal_Robots_ROS2_Description"]
+	path = src/Universal_Robots_ROS2_Description
+	url = https://github.com/UniversalRobots/Universal_Robots_ROS2_Description.git
+[submodule "src/Universal_Robots_ROS2_GZ_Simulation"]
+	path = src/Universal_Robots_ROS2_GZ_Simulation
+	url = https://github.com/UniversalRobots/Universal_Robots_ROS2_GZ_Simulation.git
+[submodule "src/robotiq_hande_description"]
+	path = src/robotiq_hande_description
+	url = https://github.com/ros-industrial/robotiq_hande_description.git
+[submodule "src/robotiq_hande_driver"]
+	path = src/robotiq_hande_driver
+	url = https://github.com/ros-industrial/robotiq_hande_driver.git
+[submodule "src/robotiq_ros2"]
+	path = src/robotiq_ros2
+	url = https://github.com/ros-industrial/robotiq_ros2.git
