@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="table">
+
+  <xacro:macro name="table">
+
+    <link name="table_link">
+      <visual>
+        <geometry>
+          <box size="0.95 0.60 0.05"/>
+        </geometry>
+      </visual>
+    </link>
+
+    <joint name="table_joint" type="fixed">
+      <parent link="world"/>
+      <child link="table_link"/>
+      <origin xyz="0 0 -0.05" rpy="0 0 0"/>
+    </joint>
+
+  </xacro:macro>
+
+</robot>

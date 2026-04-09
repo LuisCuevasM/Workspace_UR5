@@ -1,0 +1,51 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://wiki.ros.org/xacro">
+
+  <xacro:macro name="ft300_body" params="prefix">
+
+    <!-- Material único por prefix -->
+    <material name="${prefix}ft300_dark">
+      <color rgba="0.2 0.2 0.2 1.0"/>
+    </material>
+
+    <!-- Link único -->
+    <link name="${prefix}ft300_link">
+
+      <visual>
+        <geometry>
+          <mesh filename="package://robotiq_hande_description/meshes/G-008-RESSORT.stl" scale="0.001 0.001 0.001"/>
+        </geometry>
+        <material name="${prefix}ft300_dark"/>
+      </visual>
+
+      <visual>
+        <geometry>
+          <mesh filename="package://robotiq_hande_description/meshes/G-E02-CARTE_MAIN_G_B_Dfaut.stl" scale="0.001 0.001 0.001"/>
+        </geometry>
+        <material name="${prefix}ft300_dark"/>
+      </visual>
+
+      <visual>
+        <geometry>
+          <mesh filename="package://robotiq_hande_description/meshes/G-014-COUPLING.stl" scale="0.001 0.001 0.001"/>
+        </geometry>
+        <material name="${prefix}ft300_dark"/>
+      </visual>
+
+      <visual>
+        <geometry>
+          <mesh filename="package://robotiq_hande_description/meshes/G-027-JOINT-CONNECTEUR.stl" scale="0.001 0.001 0.001"/>
+        </geometry>
+        <material name="${prefix}ft300_dark"/>
+      </visual>
+
+      <collision>
+        <geometry>
+          <box size="0.07 0.07 0.04"/>
+        </geometry>
+      </collision>
+
+    </link>
+  </xacro:macro>
+
+</robot>

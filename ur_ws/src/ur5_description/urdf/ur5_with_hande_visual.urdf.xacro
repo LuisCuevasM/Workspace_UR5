@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="ur5_full">
+
+  <!-- INCLUDES -->
+  <xacro:include filename="$(find ur5_description)/urdf/ur5.urdf.xacro"/>
+  <xacro:include filename="$(find ur5_description)/urdf/ft300_simple.xacro"/>
+  <xacro:include filename="$(find robotiq_hande_description)/urdf/robotiq_hande_visual.xacro"/>
+
+  <!-- WORLD -->
+  <link name="world"/>
+
+  <joint name="world_to_base" type="fixed">
+    <parent link="world"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- FT SENSOR -->
+  <xacro:ft300_simple prefix="" parent="tool0"/>
+
+  <!-- GRIPPER -->
+  <xacro:robotiq_hande_gripper_visual
+    prefix=""
+    parent="ft300_link"
+    xyz="0 0 0.02"
+    rpy="0 0 0"
+  />
+
+  <!-- TCP -->
+  <link name="tcp"/>
+
+  <joint name="tcp_joint" type="fixed">
+    <parent link="robotiq_hande_end"/>
+    <child link="tcp"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+</robot>

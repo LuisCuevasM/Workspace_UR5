@@ -1,0 +1,38 @@
+# ROS / colcon
+build/
+install/
+log/
+**/build/
+**/install/
+**/log/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor / OS
+.vscode/
+.DS_Store
+
+# Model weights / checkpoints
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# Large data / generated files
+*.bag
+*.db3
+*.mcap
+*.ply
+*.pcd
+*.npy
+*.npz
+
+# Project-specific heavy folders
+GraspGen/GraspGenModels/
+sam2/checkpoints/
+
+# Nested git dirs
+**/.git
