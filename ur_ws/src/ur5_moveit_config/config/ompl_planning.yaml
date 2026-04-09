@@ -1,0 +1,67 @@
+planner_configs:
+  RRTConnectkConfigDefault:
+    type: geometric::RRTConnect
+    range: 0.12
+
+  RRTkConfigDefault:
+    type: geometric::RRT
+    range: 0.12
+    goal_bias: 0.10
+
+  TRRTkConfigDefault:
+    type: geometric::TRRT
+    range: 0.10
+    goal_bias: 0.05
+    max_states_failed: 10
+    temp_change_factor: 2.0
+    min_temperature: 1.0e-10
+    init_temperature: 1.0e-6
+    frountier_threshold: 0.0
+    frountierNodeRatio: 0.1
+    k_constant: 0.0
+
+  PRMkConfigDefault:
+    type: geometric::PRM
+
+  PRMstarkConfigDefault:
+    type: geometric::PRMstar
+
+  RRTstarkConfigDefault:
+    type: geometric::RRTstar
+    range: 0.10
+    goal_bias: 0.05
+    delay_collision_checking: 1
+    optimization_objective: PathLengthOptimizationObjective
+    termination_condition: CostConvergence[10,0.05]
+
+  LazyPRMkConfigDefault:
+    type: geometric::LazyPRM
+
+  LazyPRMstarkConfigDefault:
+    type: geometric::LazyPRMstar
+    optimization_objective: PathLengthOptimizationObjective
+    termination_condition: CostConvergence[10,0.05]
+
+  APSkConfigDefault:
+    type: geometric::AnytimePathShortening
+    shortcut: 1
+    hybridize: 1
+    max_hybrid_paths: 24
+    num_planners: 4
+    planners: "RRTConnectkConfigDefault,RRTConnectkConfigDefault,RRTkConfigDefault,PRMkConfigDefault"
+
+ur_arm:
+  planner_configs:
+    - RRTConnectkConfigDefault
+    - RRTkConfigDefault
+    - TRRTkConfigDefault
+    - PRMkConfigDefault
+    - PRMstarkConfigDefault
+    - RRTstarkConfigDefault
+    - LazyPRMkConfigDefault
+    - LazyPRMstarkConfigDefault
+    - APSkConfigDefault
+
+  projection_evaluator: joints(shoulder_pan_joint,shoulder_lift_joint)
+  longest_valid_segment_fraction: 0.005
+  enforce_joint_model_state_space: true
