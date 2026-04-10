@@ -6,8 +6,8 @@ moveit_setup_assistant_config:
     relative_path: config/ur5_full.srdf
   package_settings:
     author_name: luis
-    author_email: ""
-    generated_timestamp: 1773849258
+    author_email: luis.cuevas@ug.uchile.cl
+    generated_timestamp: 1775828100
   control_xacro:
     command:
       - position
