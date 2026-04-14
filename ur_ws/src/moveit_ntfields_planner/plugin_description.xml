@@ -1,0 +1,10 @@
+<library path="moveit_ntfields_planner">
+  <class
+    name="moveit_ntfields_planner/NTFieldsPlanner"
+    type="moveit_ntfields_planner::NTFieldsPlannerManager"
+    base_class_type="planning_interface::PlannerManager">
+    <description>
+      Minimal joint-space planner plugin scaffold for NTFields.
+    </description>
+  </class>
+</library>

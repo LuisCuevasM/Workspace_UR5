@@ -17,7 +17,8 @@ set(HW_IF_INCLUDE_DEPENDS
     pluginlib
     rclcpp
     rclcpp_lifecycle
-    rcpputils)
+    rcpputils
+    std_msgs)
 
 find_package(ament_cmake REQUIRED)
 

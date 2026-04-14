@@ -2,11 +2,13 @@
 #define ROBOTIQ_HANDE_DRIVER__HANDE_HARDWARE_INTERFACE_HPP_
 #include <atomic>
 #include <chrono>
+#include <mutex>
 #include <optional>
 #include <thread>
 
 #include <hardware_interface/system_interface.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/float64.hpp>
 
 #include "robotiq_hande_driver/hande_gripper.hpp"
 #include "robotiq_hande_driver/socat_manager.hpp"
@@ -51,6 +53,8 @@ class RobotiqHandeHardwareInterface : public HWI::SystemInterface {
 
     std::shared_ptr<rclcpp::Logger> logger_;
     rclcpp::Clock::SharedPtr clock_;
+    rclcpp::Node::SharedPtr telemetry_node_;
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr current_publisher_;
 
     std::chrono::milliseconds th_sleep_rate_;
     std::atomic<bool> th_comm_enabled_;
@@ -61,9 +65,11 @@ class RobotiqHandeHardwareInterface : public HWI::SystemInterface {
 
     double state_position_;
     double state_velocity_;
+    double state_current_;
     std::mutex mtx_read_;
     double read_position_;
     double read_velocity_;
+    double read_current_;
 
     double cmd_position_;
     double cmd_force_;

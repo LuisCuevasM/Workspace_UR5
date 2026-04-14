@@ -1,0 +1,8 @@
+planner_configs:
+  NTFieldsJointInterpolation:
+    type: NTFieldsJointInterpolation
+
+ur_arm:
+  planner_configs:
+    - NTFieldsJointInterpolation
+  default_planner_config: NTFieldsJointInterpolation

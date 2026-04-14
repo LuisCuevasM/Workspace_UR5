@@ -6,6 +6,7 @@ import rclpy
 from rclpy.node import Node
 
 from std_msgs.msg import Header, Float32
+from std_srvs.srv import Trigger
 from geometry_msgs.msg import PoseArray, Pose, PoseStamped
 from visualization_msgs.msg import Marker, MarkerArray
 from sensor_msgs.msg import PointCloud2
@@ -85,6 +86,20 @@ def make_gripper_marker(header, mid, T, color):
 
     return m
 
+def rotate_marker_frame(T, axis='z', degrees=90.0):
+    T_rot = np.eye(4)
+
+    if axis == 'x':
+        T_rot[:3, :3] = R.from_euler('x', degrees, degrees=True).as_matrix()
+    elif axis == 'y':
+        T_rot[:3, :3] = R.from_euler('y', degrees, degrees=True).as_matrix()
+    elif axis == 'z':
+        T_rot[:3, :3] = R.from_euler('z', degrees, degrees=True).as_matrix()
+    else:
+        raise ValueError(f"axis inválido: {axis}")
+
+    return T @ T_rot
+
 
 def scale_grasp_radially(grasps, center, scale=1.1):
     for g in grasps:
@@ -112,6 +127,8 @@ class GraspGenCollisionNode(Node):
         self.declare_parameter("grasp_threshold", 0.6)
         self.declare_parameter("num_grasps", 200)
         self.declare_parameter("collision_threshold", 0.02)
+        self.declare_parameter("auto_infer", False)
+        self.declare_parameter("infer_service_name", "/graspgen/run_inference")
         # ── NUEVO ──────────────────────────────────────────────────────────────
         # True  → publica PoseArray + markers verde/rojo además del mejor
         # False → publica solo el mejor grasp (PoseStamped, score, marker azul)
@@ -134,6 +151,7 @@ class GraspGenCollisionNode(Node):
         self.frame_id = None
         self.cached_best_grasp = None
         self.cached_best_score = None
+        self.inference_busy = False
 
         # Publishers que siempre existen
         self.marker_pub = self.create_publisher(MarkerArray, "/graspgen/markers", 10)
@@ -157,9 +175,21 @@ class GraspGenCollisionNode(Node):
             10
         )
 
-        self.timer = self.create_timer(2.0, self.run_grasp)
+        self.infer_service = self.create_service(
+            Trigger,
+            self.get_parameter("infer_service_name").value,
+            self.handle_infer_request,
+        )
 
-        self.get_logger().info("GraspGen collision node ready")
+        self.timer = None
+        if self.get_parameter("auto_infer").value:
+            self.timer = self.create_timer(2.0, self.run_grasp)
+
+        self.get_logger().info(
+            "GraspGen collision node ready "
+            f"(auto_infer={self.get_parameter('auto_infer').value}, "
+            f"service='{self.get_parameter('infer_service_name').value}')"
+        )
 
     def object_callback(self, msg):
         self.frame_id = msg.header.frame_id
@@ -172,10 +202,9 @@ class GraspGenCollisionNode(Node):
         if pc is not None:
             self.scene_pc = pc
 
-    def run_grasp(self):
-
+    def _compute_and_publish_best_grasp(self):
         if self.object_pc is None or self.scene_pc is None:
-            return
+            return False, "No hay pointcloud de objeto o escena disponible"
 
         object_pc = self.object_pc
         scene_pc = self.scene_pc
@@ -206,7 +235,7 @@ class GraspGenCollisionNode(Node):
         )
 
         if len(grasps_t) == 0:
-            return
+            return False, "La inferencia no devolvio grasps candidatos"
 
         grasps = grasps_t.detach().cpu().numpy()
         conf = conf_t.detach().cpu().numpy()
@@ -238,7 +267,7 @@ class GraspGenCollisionNode(Node):
 
         if len(free) == 0:
             self.get_logger().warn("No hay grasps libres después del filtro de colisión")
-            return
+            return False, "No hay grasps libres despues del filtro de colision"
 
         best_idx = int(np.argmax(free_conf))
         candidate_best_grasp = free[best_idx].copy()
@@ -294,10 +323,12 @@ class GraspGenCollisionNode(Node):
         ma.markers.append(delete)
 
         # Marker azul del mejor grasp → siempre
-        ma.markers.append(
-            make_gripper_marker(header, 10000, best_grasp, (0.0, 0.0, 1.0))
-        )
+        best_grasp_marker = rotate_marker_frame(best_grasp, axis='z', degrees=90.0)
 
+        ma.markers.append(
+            make_gripper_marker(header, 10000, best_grasp_marker, (0.0, 0.0, 1.0))
+        )
+        
         if publish_all:
             # Markers verdes (libres) y rojos (colisionando)
             mid = 0
@@ -340,6 +371,40 @@ class GraspGenCollisionNode(Node):
             f"publish_all={publish_all} "
             f"dt={time.time()-t0:.3f}s"
         )
+        return True, (
+            f"Grasp listo: free={len(free)} colliding={len(colliding)} "
+            f"best_score={best_score:.3f} source={best_source}"
+        )
+
+    def run_grasp(self):
+        if self.inference_busy:
+            self.get_logger().debug("Inferencia ya en curso, se omite este disparo.")
+            return
+
+        self.inference_busy = True
+        try:
+            ok, msg = self._compute_and_publish_best_grasp()
+            if not ok:
+                self.get_logger().warn(msg)
+        finally:
+            self.inference_busy = False
+
+    def handle_infer_request(self, request, response):
+        del request
+
+        if self.inference_busy:
+            response.success = False
+            response.message = "Inferencia ya en curso"
+            return response
+
+        self.inference_busy = True
+        try:
+            ok, msg = self._compute_and_publish_best_grasp()
+            response.success = ok
+            response.message = msg
+            return response
+        finally:
+            self.inference_busy = False
 
 
 def main():

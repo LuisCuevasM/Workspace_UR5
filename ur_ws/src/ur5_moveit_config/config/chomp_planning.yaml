@@ -1,0 +1,23 @@
+planning_plugin: chomp_interface/CHOMPPlanner
+
+chomp:
+  learning_rate: 0.01
+  ridge_factor: 0.01           # >= 0.001 para evitar obstáculos (ver tutorial)
+  use_stochastic_descent: true
+  enable_failure_recovery: true
+  max_recovery_attempts: 5
+
+  # Inicialización desde la trayectoria de OMPL (fillTrajectory)
+  trajectory_initialization_method: "fillTrajectory"
+
+  # Parámetros de la trayectoria
+  num_timesteps: 60
+  max_iterations: 200
+  max_iterations_after_collision_free: 5
+  smoothness_cost_weight: 0.1
+  obstacle_cost_weight: 1.0
+  dynamic_collision_detection: false
+  collision_clearance: 0.2
+  collision_threshold: 0.07
+  filter_mode: false
+  random_jump_amount: 0.0

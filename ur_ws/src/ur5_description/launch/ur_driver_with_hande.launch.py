@@ -113,7 +113,7 @@ def generate_launch_description():
         executable="static_transform_publisher",
         name="base_to_camera_tf",
         arguments=[
-            "0.016", "0.048", "0.137",  # TRASLACIÓN
+            "0.016", "0.0485", "0.137",  # TRASLACIÓN
             "0.0", "-1.57", "-1.57",  # ROTACIÓN
             "tool0",          # Origen (El robot)
             "camera_link"         # Destino (La base de la cámara)

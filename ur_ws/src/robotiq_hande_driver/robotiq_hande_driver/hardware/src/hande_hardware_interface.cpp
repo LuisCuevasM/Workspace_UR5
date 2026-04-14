@@ -25,6 +25,9 @@ HWI::CallbackReturn RobotiqHandeHardwareInterface::on_init(const HWI::HardwareIn
     logger_ = std::make_shared<rclcpp::Logger>(
         rclcpp::get_logger("controller_manager.resource_manager.hardware_component.system."
                            "RobotiqHandeHardwareInterface"));
+    telemetry_node_ = std::make_shared<rclcpp::Node>("robotiq_hande_telemetry");
+    current_publisher_ =
+        telemetry_node_->create_publisher<std_msgs::msg::Float64>("~/current", 10);
     log_parsed_urdf_config();
 
     th_comm_enabled_.store(false);
@@ -64,8 +67,10 @@ HWI::CallbackReturn RobotiqHandeHardwareInterface::on_init(const HWI::HardwareIn
 
     state_position_ = gripper_position_max_;
     state_velocity_ = 0.0;
+    state_current_ = 0.0;
     read_position_ = state_position_;
     read_velocity_ = state_velocity_;
+    read_current_ = state_current_;
 
     cmd_force_ = 1.0;
     cmd_position_ = gripper_position_max_;
@@ -213,6 +218,13 @@ void RobotiqHandeHardwareInterface::gripper_communication() {
             {
                 std::lock_guard<std::mutex> lock(mtx_read_);
                 read_position_ = gripper_driver_.get_position();
+                read_current_ = gripper_driver_.get_current();
+            }
+
+            if(current_publisher_) {
+                std_msgs::msg::Float64 msg;
+                msg.data = gripper_driver_.get_current();
+                current_publisher_->publish(msg);
             }
 
             {
@@ -281,6 +293,7 @@ HWI::return_type RobotiqHandeHardwareInterface::read(
 
     state_position_ = read_position_;
     state_velocity_ = read_velocity_;
+    state_current_ = read_current_;
 
     return hardware_interface::return_type::OK;
 }

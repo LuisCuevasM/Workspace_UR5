@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.8)
 project(ur5_description)
 
+# 1. Encontrar paquetes necesarios
 find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(moveit_msgs REQUIRED)
@@ -11,32 +12,23 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(xacro REQUIRED)
 
-add_executable(grasp2moveit src/grasp2moveit.cpp)
-ament_target_dependencies(
-  grasp2moveit
-  geometry_msgs
-  moveit_msgs
-  moveit_ros_planning_interface
-  rclcpp
-  std_srvs
-  tf2_geometry_msgs
-  tf2_ros
-)
+# --- SECCIÓN DE C++ REMOVIDA TEMPORALMENTE ---
+# Aquí es donde fallaba. No puedes poner ament_target_dependencies 
+# ni install(TARGETS) si no has definido un add_executable antes.
 
-install(TARGETS
-  grasp2moveit
-  DESTINATION lib/${PROJECT_NAME}
-)
-
+# 2. Instalar scripts de Python
+# Estos no necesitan compilación, solo se copian a la carpeta de instalación
 install(PROGRAMS
   src/ur5_move_group_client.py
-  src/ur5_square_points_pub.py
+  src/ur5_return_home_on_success.py
   src/gripper_jointstate.py
+  src/ntfields_client.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
+# 3. Instalar directorios de recursos
 install(
-  DIRECTORY urdf meshes models config rviz worlds launch
+  DIRECTORY urdf models config rviz worlds launch
   DESTINATION share/${PROJECT_NAME}
 )
 

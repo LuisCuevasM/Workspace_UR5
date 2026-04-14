@@ -9,3 +9,6 @@ default_sensor:
   padding_scale: 1.0
   point_subsample: 1
   filtered_cloud_topic: "filtered_cloud"
+
+octomap_resolution: 0.01
+octomap_frame: camera_color_optical_frame

@@ -30,6 +30,11 @@ __pycache__/
 *.npy
 *.npz
 
+
+# GraspGen models (MUY IMPORTANTE)
+GraspGen/grasp_gen/models/
+
+
 # Project-specific heavy folders
 GraspGen/GraspGenModels/
 sam2/checkpoints/

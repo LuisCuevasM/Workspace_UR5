@@ -12,9 +12,12 @@
 
   <!-- Runtime + Build Dependencies -->
   <depend>xacro</depend>
+  <depend>rclpy</depend>
   <depend>rclcpp</depend>
+  <depend>action_msgs</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>control_msgs</depend>
   <depend>trajectory_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
