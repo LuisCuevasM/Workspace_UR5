@@ -41,6 +41,16 @@ class MinimalGraspExecutor(Node):
         self.target_frame = self.declare_parameter("target_frame", "base_link").value
         self.execute = self.declare_parameter("execute", True).value
         self.auto_start = self.declare_parameter("auto_start", True).value
+        self.use_approach_stage = self.declare_parameter(
+            "use_approach_stage", True
+        ).value
+        self.approach_offset = float(
+            self.declare_parameter("approach_offset", 0.08).value
+        )
+        self.approach_axis = self.declare_parameter("approach_axis", "z").value
+        self.approach_sign = float(
+            self.declare_parameter("approach_sign", -1.0).value
+        )
         self.ik_link = self.declare_parameter("ik_link", "robotiq_hande_end").value
         self.grasp_pose_link = self.declare_parameter(
             "grasp_pose_link", self.ik_link
@@ -55,7 +65,7 @@ class MinimalGraspExecutor(Node):
             "ik_service_name", "/compute_ik"
         ).value
         self.grasp_result_timeout_sec = float(
-            self.declare_parameter("grasp_result_timeout_sec", 5.0).value
+            self.declare_parameter("grasp_result_timeout_sec", 20.0).value
         )
         self.max_ik_retries = int(
             self.declare_parameter("max_ik_retries", 5).value
@@ -120,6 +130,7 @@ class MinimalGraspExecutor(Node):
         self.current_motion_phase = "idle"
         self.current_gripper_phase = "idle"
         self.gripper_goal_active = False
+        self.pending_grasp_goal_state = None
         self.moveit_cb_group = ReentrantCallbackGroup()
         self.subscriptions_cb_group = ReentrantCallbackGroup()
         self.timer_cb_group = ReentrantCallbackGroup()
@@ -195,11 +206,13 @@ class MinimalGraspExecutor(Node):
         )
 
         self.get_logger().info(
-            "Nodo listo. Coordina grasp -> IK -> MoveIt "
+            "Nodo listo. Coordina approach -> grasp -> place -> home "
             f"usando link objetivo '{self.ik_link}' "
             f"(grasp_pose_link='{self.grasp_pose_link}', execute={self.execute}, "
             f"auto_start={self.auto_start}, planning_pipeline='{self.planning_pipeline}', "
-            f"planner_id='{self.planner_id}')."
+            f"planner_id='{self.planner_id}', use_approach_stage={self.use_approach_stage}, "
+            f"approach_axis='{self.approach_axis}', approach_offset={self.approach_offset:.3f}, "
+            f"approach_sign={self.approach_sign:.1f})."
         )
 
     def _publish_table(self):
@@ -311,6 +324,7 @@ class MinimalGraspExecutor(Node):
         self.current_motion_phase = "idle"
         self.current_gripper_phase = "idle"
         self.gripper_goal_active = False
+        self.pending_grasp_goal_state = None
 
     def _handle_run_cycle_request(self, request, response):
         del request
@@ -463,6 +477,32 @@ class MinimalGraspExecutor(Node):
         pose.orientation.y = q[1]
         pose.orientation.z = q[2]
         pose.orientation.w = q[3]
+        return pose
+
+    def _offset_pose_along_local_axis(
+        self, base_pose: Pose, axis: str, distance: float
+    ) -> Pose:
+        axis_vectors = {
+            "x": (distance, 0.0, 0.0),
+            "y": (0.0, distance, 0.0),
+            "z": (0.0, 0.0, distance),
+        }
+        if axis not in axis_vectors:
+            raise ValueError(f"Eje de aproximacion invalido: {axis}")
+
+        base_quat = (
+            base_pose.orientation.x,
+            base_pose.orientation.y,
+            base_pose.orientation.z,
+            base_pose.orientation.w,
+        )
+        offset_xyz = self._rotate_vector(base_quat, axis_vectors[axis])
+
+        pose = Pose()
+        pose.position.x = base_pose.position.x + offset_xyz[0]
+        pose.position.y = base_pose.position.y + offset_xyz[1]
+        pose.position.z = base_pose.position.z + offset_xyz[2]
+        pose.orientation = base_pose.orientation
         return pose
 
     def _convert_pose_for_ik_link(self, target_pose: Pose) -> Pose:
@@ -676,7 +716,19 @@ class MinimalGraspExecutor(Node):
                     self._finish_cycle()
                     return
 
-                if phase == "grasp":
+                if phase == "approach":
+                    if self.pending_grasp_goal_state is None:
+                        self.get_logger().error(
+                            "No hay objetivo de grasp final pendiente tras la aproximacion."
+                        )
+                        self._finish_cycle()
+                        return
+                    self._send_joint_goal(
+                        self.pending_grasp_goal_state,
+                        "grasp",
+                        "grasp final",
+                    )
+                elif phase == "grasp":
                     self._send_gripper_goal(
                         self.close_gripper_position,
                         self.close_gripper_max_effort,
@@ -807,7 +859,41 @@ class MinimalGraspExecutor(Node):
 
             goal_joint_state, joint_distance = goal_state_info
             self.current_retry_count = 0
-            self._send_joint_goal(goal_joint_state, "grasp", "grasp")
+            self.pending_grasp_goal_state = goal_joint_state
+
+            if self.use_approach_stage and self.approach_offset > 0.0:
+                approach_target_pose = self._offset_pose_along_local_axis(
+                    target_pose,
+                    self.approach_axis,
+                    self.approach_sign * self.approach_offset,
+                )
+
+                if not self._is_target_reachable(approach_target_pose):
+                    self._retry_grasp("approach fuera de alcance")
+                    return
+
+                approach_ik_pose = self._convert_pose_for_ik_link(approach_target_pose)
+                approach_goal_info = self._solve_ik(
+                    approach_ik_pose, self.latest_arm_joint_state
+                )
+                if approach_goal_info is None:
+                    self._retry_grasp("IK invalida para approach")
+                    return
+
+                approach_joint_state, approach_joint_distance = approach_goal_info
+                self._send_joint_goal(
+                    approach_joint_state,
+                    "approach",
+                    "approach/pregrasp",
+                )
+                self.get_logger().info(
+                    "Objetivo de approach resuelto en el frame local del grasp. "
+                    f"axis='{self.approach_axis}' | "
+                    f"offset={self.approach_sign * self.approach_offset:.3f} m | "
+                    f"distancia_joint={approach_joint_distance:.3f} rad"
+                )
+            else:
+                self._send_joint_goal(goal_joint_state, "grasp", "grasp final")
 
             q_start = ", ".join(
                 f"{name}={position:.3f}"

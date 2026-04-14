@@ -40,7 +40,7 @@ def generate_launch_description():
 
     # ---- Locate included launch files ----
     ur_robot_driver_share = get_package_share_directory("ur_robot_driver")
-    ur_moveit_share = get_package_share_directory("ur_moveit_config")
+    ur_moveit_share = get_package_share_directory("ur5_moveit_config")
     robotiq_share = get_package_share_directory("robotiq_hande_driver")
     realsense_share = get_package_share_directory("realsense2_camera")
 
@@ -48,7 +48,7 @@ def generate_launch_description():
         ur_robot_driver_share, "launch", "ur_control.launch.py"
     )
     ur_moveit_launch = os.path.join(
-        ur_moveit_share, "launch", "ur_moveit.launch.py"
+        ur_moveit_share, "launch", "move_group.launch.py"
     )
     gripper_launch = os.path.join(
         robotiq_share, "bringup", "launch", "gripper_controller_preview.launch.py"
@@ -81,12 +81,6 @@ def generate_launch_description():
     # ---- Include: MoveIt ----
     moveit = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(ur_moveit_launch),
-        launch_arguments={
-            "ur_type": ur_type,
-            "launch_rviz": launch_rviz,
-            "warehouse_sqlite_path": warehouse_sqlite_path,
-             "use_sim_time": use_sim_time,
-        }.items(),
     )
 
     # ---- Transformación Estática  ----
@@ -143,11 +137,11 @@ def generate_launch_description():
     # ---- Timing ----
     actions = [
         #TimerAction(period=2.0, actions=[ur_control]),
-        #tf_ur5_to_gripper, # <-- LANZAMOS EL NODO TF
+        TimerAction(period=4.0, actions=[gripper]),
+        TimerAction(period=6.0, actions=[moveit]),
         realsense,
         tf_base_to_camera,
         gripper_joint_filler,
-        #TimerAction(period=4.0, actions=[gripper]),
     ]
 
     return LaunchDescription(declare_args + actions)
