@@ -5,6 +5,7 @@
   <xacro:include filename="$(find ur5_description)/urdf/ur5.urdf.xacro"/>
   <xacro:include filename="$(find ur5_description)/urdf/ft300_simple.xacro"/>
   <xacro:include filename="$(find robotiq_hande_description)/urdf/robotiq_hande_visual.xacro"/>
+  <xacro:include filename="$(find realsense2_description)/urdf/_d435i.urdf.xacro"/>
 
   <!-- WORLD -->
   <link name="world"/>
@@ -34,5 +35,29 @@
     <child link="tcp"/>
     <origin xyz="0 0 0" rpy="0 0 0"/>
   </joint>
+
+    <!-- SOPORTE ENTRE GRIPPER Y CAMARA -->
+  <link name="camera_mount_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.01 0.09 0.026"/> <!-- cubo de 4 cm -->
+      </geometry>
+      <material name="gray">
+        <color rgba="0.5 0.5 0.5 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="camera_mount_joint" type="fixed">
+    <parent link="tcp"/>
+    <child link="camera_mount_link"/>
+    <origin xyz="0.0 -0.036 -0.07" rpy="0 0 1.57"/>
+  </joint>
+
+  <!-- REALSENSE D435i -->
+  <xacro:sensor_d435 parent="camera_mount_link" name="camera" use_nominal_extrinsics="true">
+    <origin xyz="0.0 -0.005 0.0" rpy="-1.57 -1.57 1.57"/>
+  </xacro:sensor_d435>
 
 </robot>

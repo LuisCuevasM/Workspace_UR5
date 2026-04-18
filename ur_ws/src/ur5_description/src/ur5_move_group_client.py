@@ -108,12 +108,12 @@ class MinimalGraspExecutor(Node):
         self.home_joint_positions = list(
             self.declare_parameter(
                 "home_joint_positions",
-                [0.8901, -1.0472, -2.0245, -1.0297, 1.4835, 3.3335],
+                [0.8901, -1.0472, -2.0245, -1.0297, 1.4835, 0.0],
             ).value
         )
 
         self.table_top_z = 0.0
-        self.min_target_z = 0.03
+        self.min_target_z = 0.01
         self.goal_joint_tolerance = 1e-3
         self.ik_timeout = Duration(sec=0, nanosec=250_000_000)
         self.latest_arm_joint_state = None
