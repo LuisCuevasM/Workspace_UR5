@@ -129,6 +129,7 @@ class GraspGenCollisionNode(Node):
         self.declare_parameter("collision_threshold", 0.02)
         self.declare_parameter("auto_infer", False)
         self.declare_parameter("infer_service_name", "/graspgen/run_inference")
+        self.declare_parameter("top_grasp_count", 5)
         # ── NUEVO ──────────────────────────────────────────────────────────────
         # True  → publica PoseArray + markers verde/rojo además del mejor
         # False → publica solo el mejor grasp (PoseStamped, score, marker azul)
@@ -157,6 +158,7 @@ class GraspGenCollisionNode(Node):
         self.marker_pub = self.create_publisher(MarkerArray, "/graspgen/markers", 10)
         self.best_grasp_pub = self.create_publisher(PoseStamped, "/graspgen/best_grasp", 10)
         self.best_score_pub = self.create_publisher(Float32, "/graspgen/best_score", 10)
+        self.top_grasps_pub = self.create_publisher(PoseArray, "/graspgen/top_grasps", 10)
 
         # Publisher opcional (solo útil cuando publish_all_grasps=True)
         self.pose_pub = self.create_publisher(PoseArray, "/graspgen/poses", 10)
@@ -269,28 +271,37 @@ class GraspGenCollisionNode(Node):
             self.get_logger().warn("No hay grasps libres después del filtro de colisión")
             return False, "No hay grasps libres despues del filtro de colision"
 
-        best_idx = int(np.argmax(free_conf))
-        candidate_best_grasp = free[best_idx].copy()
-        candidate_best_score = float(free_conf[best_idx])
+        top_grasp_count = max(1, int(self.get_parameter("top_grasp_count").value))
+        sorted_idx = np.argsort(-free_conf)
+        top_idx = sorted_idx[:top_grasp_count]
+        top_free = free[top_idx].copy()
+        top_free_conf = free_conf[top_idx].copy()
 
-        if (
-            self.cached_best_grasp is None
-            or self.cached_best_score is None
-            or candidate_best_score > self.cached_best_score
-        ):
-            self.cached_best_grasp = candidate_best_grasp
-            self.cached_best_score = candidate_best_score
-            best_grasp = candidate_best_grasp
-            best_score = candidate_best_score
-            best_source = "current"
-        else:
-            best_grasp = self.cached_best_grasp.copy()
-            best_score = self.cached_best_score
-            best_source = "cached"
+        best_grasp = top_free[0].copy()
+        best_score = float(top_free_conf[0])
+        best_source = "current"
+        self.cached_best_grasp = best_grasp.copy()
+        self.cached_best_score = best_score
 
         header = Header()
         header.stamp = self.get_clock().now().to_msg()
         header.frame_id = self.frame_id
+
+        top_pose_array = PoseArray()
+        top_pose_array.header = header
+        for g in top_free:
+            p, q = mat4_to_pose(g)
+            pose = Pose()
+            pose.position.x = float(p[0])
+            pose.position.y = float(p[1])
+            pose.position.z = float(p[2])
+            pose.orientation.x = float(q[0])
+            pose.orientation.y = float(q[1])
+            pose.orientation.z = float(q[2])
+            pose.orientation.w = float(q[3])
+            top_pose_array.poses.append(pose)
+
+        self.top_grasps_pub.publish(top_pose_array)
 
         # --------------------------------------------------
         # MEJOR GRASP → siempre se publica
@@ -328,6 +339,17 @@ class GraspGenCollisionNode(Node):
         ma.markers.append(
             make_gripper_marker(header, 10000, best_grasp_marker, (0.0, 0.0, 1.0))
         )
+
+        for rank, g in enumerate(top_free[1:], start=2):
+            top_marker = rotate_marker_frame(g, axis='z', degrees=90.0)
+            ma.markers.append(
+                make_gripper_marker(
+                    header,
+                    10000 + rank,
+                    top_marker,
+                    (0.0, 0.8, 0.8),
+                )
+            )
         
         if publish_all:
             # Markers verdes (libres) y rojos (colisionando)
@@ -368,12 +390,14 @@ class GraspGenCollisionNode(Node):
         self.get_logger().info(
             f"grasps free={len(free)} colliding={len(colliding)} "
             f"best_score={best_score:.3f} source={best_source} "
+            f"top_published={len(top_free)} "
             f"publish_all={publish_all} "
             f"dt={time.time()-t0:.3f}s"
         )
         return True, (
             f"Grasp listo: free={len(free)} colliding={len(colliding)} "
-            f"best_score={best_score:.3f} source={best_source}"
+            f"best_score={best_score:.3f} source={best_source} "
+            f"top_published={len(top_free)}"
         )
 
     def run_grasp(self):

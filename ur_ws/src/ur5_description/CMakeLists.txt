@@ -19,6 +19,7 @@ find_package(xacro REQUIRED)
 # 2. Instalar scripts de Python
 # Estos no necesitan compilación, solo se copian a la carpeta de instalación
 install(PROGRAMS
+  src/ur5_behavior_tree_node.py
   src/ur5_move_group_client.py
   src/ur5_return_home_on_success.py
   src/gripper_jointstate.py

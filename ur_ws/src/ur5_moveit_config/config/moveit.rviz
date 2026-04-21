@@ -3,10 +3,9 @@ Panels:
     Help Height: 70
     Name: Displays
     Property Tree Widget:
-      Expanded:
-        - /PointCloud21
+      Expanded: ~
       Splitter Ratio: 0.5
-    Tree Height: 438
+    Tree Height: 175
   - Class: rviz_common/Help
     Name: Help
   - Class: rviz_common/Views
@@ -37,7 +36,7 @@ Visualization Manager:
       Value: true
     - Acceleration_Scaling_Factor: 0.1
       Class: moveit_rviz_plugin/MotionPlanning
-      Enabled: false
+      Enabled: true
       Move Group Namespace: ""
       MoveIt_Allow_Approximate_IK: false
       MoveIt_Allow_External_Program: false
@@ -383,129 +382,8 @@ Visualization Manager:
         Robot Alpha: 0.5
         Show Robot Collision: false
         Show Robot Visual: true
-      Value: false
-      Velocity_Scaling_Factor: 0.1
-    - Class: rviz_default_plugins/TF
-      Enabled: true
-      Frame Timeout: 15
-      Frames:
-        All Enabled: false
-        base:
-          Value: false
-        base_link:
-          Value: true
-        base_link_inertia:
-          Value: false
-        camera_bottom_screw_frame:
-          Value: false
-        camera_color_frame:
-          Value: false
-        camera_color_optical_frame:
-          Value: false
-        camera_depth_frame:
-          Value: false
-        camera_depth_optical_frame:
-          Value: false
-        camera_infra1_frame:
-          Value: false
-        camera_infra1_optical_frame:
-          Value: false
-        camera_infra2_frame:
-          Value: false
-        camera_infra2_optical_frame:
-          Value: false
-        camera_link:
-          Value: true
-        camera_mount_link:
-          Value: false
-        flange:
-          Value: false
-        forearm_link:
-          Value: false
-        ft300_ft300_link:
-          Value: false
-        ft300_link:
-          Value: false
-        ft_frame:
-          Value: false
-        robotiq_hande_coupler:
-          Value: false
-        robotiq_hande_end:
-          Value: false
-        robotiq_hande_left_finger:
-          Value: false
-        robotiq_hande_link:
-          Value: false
-        robotiq_hande_right_finger:
-          Value: false
-        shoulder_link:
-          Value: false
-        tcp:
-          Value: true
-        tool0:
-          Value: false
-        tool0_controller:
-          Value: false
-        upper_arm_link:
-          Value: false
-        world:
-          Value: false
-        wrist_1_link:
-          Value: false
-        wrist_2_link:
-          Value: false
-        wrist_3_link:
-          Value: false
-      Marker Scale: 0.3499999940395355
-      Name: TF
-      Show Arrows: true
-      Show Axes: true
-      Show Names: false
-      Tree:
-        world:
-          base_link:
-            base:
-              tool0_controller:
-                {}
-            base_link_inertia:
-              shoulder_link:
-                upper_arm_link:
-                  forearm_link:
-                    wrist_1_link:
-                      wrist_2_link:
-                        wrist_3_link:
-                          flange:
-                            tool0:
-                              ft300_link:
-                                robotiq_hande_coupler:
-                                  ft300_ft300_link:
-                                    {}
-                                  robotiq_hande_link:
-                                    robotiq_hande_end:
-                                      tcp:
-                                        camera_mount_link:
-                                          camera_bottom_screw_frame:
-                                            camera_link:
-                                              camera_color_frame:
-                                                camera_color_optical_frame:
-                                                  {}
-                                              camera_depth_frame:
-                                                camera_depth_optical_frame:
-                                                  {}
-                                              camera_infra1_frame:
-                                                camera_infra1_optical_frame:
-                                                  {}
-                                              camera_infra2_frame:
-                                                camera_infra2_optical_frame:
-                                                  {}
-                                    robotiq_hande_left_finger:
-                                      {}
-                                    robotiq_hande_right_finger:
-                                      {}
-                          ft_frame:
-                            {}
-      Update Interval: 0
       Value: true
+      Velocity_Scaling_Factor: 0.1
     - Alpha: 1
       Autocompute Intensity Bounds: true
       Autocompute Value Bounds:
@@ -516,7 +394,7 @@ Visualization Manager:
       Channel Name: intensity
       Class: rviz_default_plugins/PointCloud2
       Color: 255; 255; 255
-      Color Transformer: RGB8
+      Color Transformer: Intensity
       Decay Time: 0
       Enabled: true
       Invert Rainbow: false
@@ -536,170 +414,42 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /camera/camera/depth/color/points
+        Value: /sam2/object_cloud
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
     - Alpha: 1
-      Class: rviz_default_plugins/RobotModel
-      Collision Enabled: false
-      Description File: ""
-      Description Source: Topic
-      Description Topic:
+      Axes Length: 1
+      Axes Radius: 0.10000000149011612
+      Class: rviz_default_plugins/Pose
+      Color: 255; 25; 0
+      Enabled: true
+      Head Length: 0.029999999329447746
+      Head Radius: 0.009999999776482582
+      Name: Pose
+      Shaft Length: 0.10000000149011612
+      Shaft Radius: 0.004999999888241291
+      Shape: Arrow
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: ""
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: MarkerArray
+      Namespaces:
+        {}
+      Topic:
         Depth: 5
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot_description
-      Enabled: true
-      Links:
-        All Links Enabled: true
-        Expand Joint Details: false
-        Expand Link Details: false
-        Expand Tree: false
-        Link Tree Style: Links in Alphabetic Order
-        base:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        base_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        base_link_inertia:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        camera_bottom_screw_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        camera_color_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        camera_color_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        camera_depth_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        camera_depth_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        camera_infra1_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        camera_infra1_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        camera_infra2_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        camera_infra2_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        camera_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        camera_mount_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        flange:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        forearm_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        ft300_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        robotiq_hande_coupler:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        robotiq_hande_end:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        robotiq_hande_left_finger:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        robotiq_hande_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        robotiq_hande_right_finger:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        shoulder_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        tcp:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        tool0:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        upper_arm_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        world:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        wrist_1_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_2_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_3_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-      Mass Properties:
-        Inertia: false
-        Mass: false
-      Name: RobotModel
-      TF Prefix: ""
-      Update Interval: 0
+        Value: visualization_marker_array
       Value: true
-      Visual Enabled: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -718,25 +468,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 0.9011209011077881
+      Distance: 2.0237314701080322
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -0.633633017539978
-        Y: -0.12303700298070908
-        Z: -0.09407076239585876
+        X: -0.6182428002357483
+        Y: -0.34751662611961365
+        Z: 0.012750960886478424
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5450001955032349
+      Pitch: 0.22000005841255188
       Target Frame: world
       Value: Orbit (rviz_default_plugins)
-      Yaw: 1.1770151853561401
+      Yaw: 5.605169773101807
     Saved: ~
 Window Geometry:
   Displays:
@@ -750,7 +500,7 @@ Window Geometry:
     collapsed: false
   MotionPlanning - Trajectory Slider:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000002b40000039dfc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000001600000016fb000000100044006900730070006c006100790073010000003b00000237000000c700fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e00670000000171000001a40000016a00fffffffb0000000800480065006c0070000000029a0000006e0000006e00fffffffb0000000a00560069006500770073010000027800000160000000a000ffffff000004c60000039d00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000002b40000039dfc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000001600000016fb000000100044006900730070006c006100790073010000003b00000130000000c700fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e00670100000171000001a40000016900fffffffb0000000800480065006c0070000000029a0000006e0000006e00fffffffb0000000a00560069006500770073010000031b000000bd000000a000ffffff000004c60000039d00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
   Width: 1920

@@ -57,7 +57,7 @@
 
   <!-- REALSENSE D435i -->
   <xacro:sensor_d435 parent="camera_mount_link" name="camera" use_nominal_extrinsics="true">
-    <origin xyz="0.0 -0.005 0.0" rpy="-1.57 -1.57 1.57"/>
+    <origin xyz="-0.0055 0.0 0.0" rpy="-1.57 -1.57 1.57"/>
   </xacro:sensor_d435>
 
 </robot>
