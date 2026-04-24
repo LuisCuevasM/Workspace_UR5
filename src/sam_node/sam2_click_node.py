@@ -64,6 +64,72 @@ def select_click(rgb):
     plt.show()
     return click["x"], click["y"]
 
+
+def select_box(rgb):
+    window_name = "Selecciona el objeto y presiona ENTER o SPACE"
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+    try:
+        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        x, y, w, h = cv2.selectROI(
+            window_name, bgr, showCrosshair=True, fromCenter=False
+        )
+        cv2.destroyWindow(window_name)
+
+        if w <= 0 or h <= 0:
+            return None
+
+        return (int(x), int(y), int(x + w), int(y + h))
+    except cv2.error:
+        pass
+
+    import matplotlib
+    try:
+        matplotlib.use("TkAgg")
+    except Exception:
+        pass
+
+    import matplotlib.pyplot as plt
+    from matplotlib.widgets import RectangleSelector
+
+    fig, ax = plt.subplots()
+    ax.imshow(rgb)
+    ax.set_title("Arrastra una caja sobre el objeto")
+    selection = {"box": None}
+
+    def onselect(eclick, erelease):
+        if eclick.xdata is None or eclick.ydata is None:
+            return
+        if erelease.xdata is None or erelease.ydata is None:
+            return
+
+        x1 = int(min(eclick.xdata, erelease.xdata))
+        y1 = int(min(eclick.ydata, erelease.ydata))
+        x2 = int(max(eclick.xdata, erelease.xdata))
+        y2 = int(max(eclick.ydata, erelease.ydata))
+
+        if x2 <= x1 or y2 <= y1:
+            return
+
+        selection["box"] = (x1, y1, x2, y2)
+        plt.close(fig)
+
+    rect_selector = RectangleSelector(
+        ax,
+        onselect,
+        useblit=False,
+        button=[1],
+        minspanx=5,
+        minspany=5,
+        spancoords="pixels",
+        interactive=False,
+    )
+
+    # Mantener viva la referencia del selector hasta que cierre la ventana.
+    fig._rectangle_selector = rect_selector
+    plt.show(block=True)
+    return selection["box"]
+
 class Sam2ServiceNode(Node):
     def __init__(self):
         super().__init__("sam2_service_node")
@@ -135,12 +201,12 @@ class Sam2ServiceNode(Node):
             response.message = "Ya hay una ventana de seleccion abierta."
             return response
 
-        if self.processing_active and hasattr(self, "click_x") and hasattr(self, "click_y"):
-            response.success = True
-            response.message = (
-                f"Ya existe una seleccion activa en ({self.click_x}, {self.click_y})."
+        if self.processing_active and hasattr(self, "prompt_box"):
+            self.get_logger().info(
+                "Reemplazando la seleccion activa previa "
+                f"{self.prompt_box.tolist()} con una nueva seleccion manual."
             )
-            return response
+            self.processing_active = False
 
         if self.latest_rgb is None:
             response.success = False
@@ -155,14 +221,14 @@ class Sam2ServiceNode(Node):
         self.selection_in_progress = True
         try:
             self.get_logger().info("Robot en Home. Abriendo selección...")
-            x, y = select_click(self.latest_rgb)
+            box = select_box(self.latest_rgb)
 
-            if x is None:
+            if box is None:
                 response.success = False
                 response.message = "Selección cancelada."
                 return response
 
-            self.click_x, self.click_y = x, y
+            self.prompt_box = np.array(box, dtype=np.float32)
             self.processing_active = True # Activamos el procesamiento en el callback
             if not self.run_inference_cycle():
                 self.processing_active = False
@@ -171,7 +237,10 @@ class Sam2ServiceNode(Node):
                 return response
 
             response.success = True
-            response.message = f"Seleccion aplicada e inferencia publicada en ({x}, {y})"
+            response.message = (
+                "Seleccion aplicada e inferencia publicada en "
+                f"{self.prompt_box.tolist()}"
+            )
             return response
         finally:
             self.selection_in_progress = False
@@ -188,7 +257,7 @@ class Sam2ServiceNode(Node):
     def handle_resume(self, request, response):
         """ Reanuda la inferencia usando la seleccion actual """
         del request
-        if not hasattr(self, "click_x") or not hasattr(self, "click_y"):
+        if not hasattr(self, "prompt_box"):
             response.success = False
             response.message = "No hay una seleccion previa para reanudar SAM2."
             return response
@@ -217,9 +286,8 @@ class Sam2ServiceNode(Node):
         with torch.inference_mode():
             self.predictor.set_image(self.latest_rgb)
             masks, scores, _ = self.predictor.predict(
-                point_coords=np.array([[self.click_x, self.click_y]], dtype=np.float32),
-                point_labels=np.array([1], dtype=np.int32),
-                multimask_output=True,
+                box=self.prompt_box,
+                multimask_output=False,
             )
 
         best = int(np.argmax(scores))

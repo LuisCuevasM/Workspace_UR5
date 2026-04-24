@@ -21,6 +21,7 @@ find_package(xacro REQUIRED)
 install(PROGRAMS
   src/ur5_behavior_tree_node.py
   src/ur5_move_group_client.py
+  src/ur5_place.py
   src/ur5_return_home_on_success.py
   src/gripper_jointstate.py
   src/ntfields_client.py

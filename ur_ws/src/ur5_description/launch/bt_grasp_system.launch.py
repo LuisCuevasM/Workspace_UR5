@@ -70,7 +70,6 @@ def generate_launch_description():
             {
                 "auto_start": False,
                 "execute": True,
-                "enable_octomap_freeze": True,
                 "pause_sam_during_pick": True,
                 "grasp_service_name": "/graspgen/run_inference",
                 "sam_select_service_name": "/sam2/select_object",
@@ -80,6 +79,21 @@ def generate_launch_description():
                 "execute_cached_cycle_service_name": "/ur5/execute_cached_grasp_cycle",
                 "go_home_service_name": "/ur5/go_home",
                 "top_grasps_topic": "/graspgen/top_grasps",
+            }
+        ],
+    )
+
+    octomap_home_cloud_manager_node = Node(
+        package="ur5_description",
+        executable="octomap_home_cloud_manager.py",
+        name="octomap_home_cloud_manager",
+        output="screen",
+        parameters=[
+            {
+                "input_cloud_topic": "/sam2/scene_cloud_no_object",
+                "output_cloud_topic": "/octomap/home_scene_cloud",
+                "clear_service_name": "/clear_octomap",
+                "publish_rate_hz": 2.0,
             }
         ],
     )
@@ -114,6 +128,7 @@ def generate_launch_description():
             sam_node,
             graspgen_node,
             move_group_client_node,
+            octomap_home_cloud_manager_node,
             bt_node,
         ]
     )

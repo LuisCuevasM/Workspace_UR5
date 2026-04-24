@@ -2,7 +2,6 @@
 
 import time
 from enum import Enum, auto
-
 import rclpy
 from geometry_msgs.msg import PoseArray, PoseStamped
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -10,13 +9,13 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
+from std_srvs.srv import Empty
 
 
 class BTStatus(Enum):
     SUCCESS = auto()
     FAILURE = auto()
     RUNNING = auto()
-
 
 class BTNode:
     def __init__(self, name: str):
@@ -27,7 +26,6 @@ class BTNode:
 
     def reset(self):
         pass
-
 
 class SequenceNode(BTNode):
     def __init__(self, name: str, children):
@@ -150,6 +148,13 @@ class BTGraspCoordinator(Node):
         self.sam_pause_service_name = self.declare_parameter(
             "sam_pause_service_name", "/sam2/pause_inference"
         ).value
+        self.clear_octomap_service_name = self.declare_parameter(
+            "clear_octomap_service_name", "/clear_octomap"
+        ).value
+        self.octomap_home_cloud_service_name = self.declare_parameter(
+            "octomap_home_cloud_service_name",
+            "/octomap_home_cloud_manager/capture_home_cloud",
+        ).value
         self.execute_cached_cycle_service_name = self.declare_parameter(
             "execute_cached_cycle_service_name", "/ur5/execute_cached_grasp_cycle"
         ).value
@@ -179,7 +184,7 @@ class BTGraspCoordinator(Node):
             self.declare_parameter("tick_period_sec", 0.1).value
         )
         self.home_joint_tolerance = float(
-            self.declare_parameter("home_joint_tolerance", 0.08).value
+            self.declare_parameter("home_joint_tolerance", 0.09).value
         )
         self.arm_joint_names = list(
             self.declare_parameter(
@@ -221,6 +226,16 @@ class BTGraspCoordinator(Node):
         self.sam_pause_client = self.create_client(
             Trigger,
             self.sam_pause_service_name,
+            callback_group=self.cb_group,
+        )
+        self.clear_octomap_client = self.create_client(
+            Empty,
+            self.clear_octomap_service_name,
+            callback_group=self.cb_group,
+        )
+        self.octomap_home_cloud_client = self.create_client(
+            Trigger,
+            self.octomap_home_cloud_service_name,
             callback_group=self.cb_group,
         )
         self.grasp_client = self.create_client(
@@ -415,6 +430,41 @@ class BTGraspCoordinator(Node):
         )
         return ok
 
+    def _clear_octomap(self) -> bool:
+        if not self.clear_octomap_client.wait_for_service(timeout_sec=1.0):
+            self.last_failure_reason = (
+                f"Servicio '{self.clear_octomap_service_name}' no disponible"
+            )
+            self.get_logger().error(
+                f"BT: servicio '{self.clear_octomap_service_name}' no disponible para limpiar OctoMap."
+            )
+            return False
+
+        future = self.clear_octomap_client.call_async(Empty.Request())
+        response = self._wait_for_future_result(future, timeout_sec=2.0)
+        if response is None:
+            self.last_failure_reason = (
+                f"Timeout en '{self.clear_octomap_service_name}' durante limpieza de OctoMap"
+            )
+            self.get_logger().error(
+                f"BT: timeout llamando a '{self.clear_octomap_service_name}' para limpiar OctoMap."
+            )
+            return False
+
+        self.get_logger().info(
+            f"BT: '{self.clear_octomap_service_name}' completado para limpieza de OctoMap."
+        )
+        return True
+
+    def _capture_octomap_home_cloud(self) -> bool:
+        ok, _ = self._call_trigger(
+            self.octomap_home_cloud_client,
+            self.octomap_home_cloud_service_name,
+            timeout_sec=8.0,
+            label="captura de nube home para OctoMap",
+        )
+        return ok
+
     def _ensure_home(self) -> bool:
         if self._is_in_home():
             self.get_logger().info("BT: el brazo ya esta en home al iniciar.")
@@ -490,6 +540,8 @@ class BTGraspCoordinator(Node):
                 OneShotActionNode("EnsureHome", self._ensure_home),
                 ConditionNode("RobotAtHome", self._is_in_home),
                 OneShotActionNode("CallSAM", self._call_sam_selection),
+                OneShotActionNode("OctoHomeCloud", self._capture_octomap_home_cloud),
+                OneShotActionNode("ClearOctomap", self._clear_octomap),
                 RetryNode(
                     "RetryPlanning",
                     planning_attempt_sequence,

@@ -2,8 +2,8 @@ sensors:
   - default_sensor
 default_sensor:
   sensor_plugin: occupancy_map_monitor/PointCloudOctomapUpdater
-  point_cloud_topic: /sam2/scene_cloud_no_object
-  max_range: 1.2
+  point_cloud_topic: /octomap/home_scene_cloud
+  max_range: 2.5
   max_update_rate: 1.0
   padding_offset: 0.01
   padding_scale: 1.0
@@ -11,4 +11,4 @@ default_sensor:
   filtered_cloud_topic: "filtered_cloud"
 
 octomap_resolution: 0.01
-octomap_frame: camera_color_optical_frame
+octomap_frame: base_link

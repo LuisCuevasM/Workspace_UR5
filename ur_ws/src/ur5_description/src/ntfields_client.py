@@ -18,7 +18,7 @@ class NTFieldsClient(Node):
     def __init__(self):
         super().__init__('ntfields_client')
 
-        self.declare_parameter('planner_url', 'http://172.19.0.2:8888/plan')
+        self.declare_parameter('planner_url', 'http://localhost:8888/plan')
         self.declare_parameter(
             'joint_names',
             [

@@ -196,6 +196,9 @@ bool NTFieldsPlanningContext::requestRemotePlan(const std::vector<double>& q_sta
   Json::StreamWriterBuilder writer_builder;
   const std::string request_json = Json::writeString(writer_builder, request_body);
 
+  RCLCPP_INFO(node_->get_logger(), "Requesting remote NTFields plan at '%s' with timeout %.2f s.",
+              planner_url_.c_str(), request_timeout_);
+
   CURL* curl = curl_easy_init();
   if (!curl)
   {
@@ -212,6 +215,8 @@ bool NTFieldsPlanningContext::requestRemotePlan(const std::vector<double>& q_sta
   curl_easy_setopt(curl, CURLOPT_POST, 1L);
   curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_json.c_str());
   curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(request_json.size()));
+  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,
+                   static_cast<long>(std::min(request_timeout_ * 1000.0, 2000.0)));
   curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(request_timeout_ * 1000.0));
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCurlResponse);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
@@ -235,6 +240,8 @@ bool NTFieldsPlanningContext::requestRemotePlan(const std::vector<double>& q_sta
                  response_body.c_str());
     return false;
   }
+
+  RCLCPP_INFO(node_->get_logger(), "Remote NTFields planner replied with HTTP %ld.", http_code);
 
   Json::CharReaderBuilder reader_builder;
   Json::Value response_json;

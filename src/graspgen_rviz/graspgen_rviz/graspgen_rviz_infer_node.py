@@ -150,6 +150,7 @@ class GraspGenCollisionNode(Node):
         self.object_pc = None
         self.scene_pc = None
         self.frame_id = None
+        self.cloud_stamp = None
         self.cached_best_grasp = None
         self.cached_best_score = None
         self.inference_busy = False
@@ -195,6 +196,7 @@ class GraspGenCollisionNode(Node):
 
     def object_callback(self, msg):
         self.frame_id = msg.header.frame_id
+        self.cloud_stamp = msg.header.stamp
         pc = pointcloud2_to_xyz(msg)
         if pc is not None:
             self.object_pc = pc
@@ -284,7 +286,7 @@ class GraspGenCollisionNode(Node):
         self.cached_best_score = best_score
 
         header = Header()
-        header.stamp = self.get_clock().now().to_msg()
+        header.stamp = self.cloud_stamp if self.cloud_stamp is not None else self.get_clock().now().to_msg()
         header.frame_id = self.frame_id
 
         top_pose_array = PoseArray()

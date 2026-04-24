@@ -66,5 +66,5 @@ ur_arm:
     - TRRTkConfigDefault
     - PRMkConfigDefault
     - PRMstarkConfigDefault
-  default_planner_config: RRTstarkConfigDefault
-  longest_valid_segment_fraction: 0.01
+  default_planner_config: RRTConnectkConfigDefault
+  longest_valid_segment_fraction: 0.005

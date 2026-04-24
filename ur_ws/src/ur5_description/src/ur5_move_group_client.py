@@ -18,7 +18,7 @@ from moveit_msgs.msg import (
     PlanningSceneWorld,
     RobotState,
 )
-from moveit_msgs.srv import GetPositionIK
+from moveit_msgs.srv import GetCartesianPath, GetPositionIK
 from rclpy.action import ActionClient
 from rcl_interfaces.msg import Parameter as ParameterMsg
 from rcl_interfaces.msg import ParameterType, ParameterValue
@@ -54,6 +54,39 @@ class MinimalGraspExecutor(Node):
         self.approach_axis = self.declare_parameter("approach_axis", "z").value
         self.approach_sign = float(
             self.declare_parameter("approach_sign", -1.0).value
+        )
+        self.approach_enable_replanning = bool(
+            self.declare_parameter("approach_enable_replanning", True).value
+        )
+        self.approach_replan_attempts = int(
+            self.declare_parameter("approach_replan_attempts", 5).value
+        )
+        self.approach_replan_delay = float(
+            self.declare_parameter("approach_replan_delay", 0.5).value
+        )
+        self.use_cartesian_for_grasp_final = bool(
+            self.declare_parameter("use_cartesian_for_grasp_final", True).value
+        )
+        self.cartesian_path_service_name = self.declare_parameter(
+            "cartesian_path_service_name", "/compute_cartesian_path"
+        ).value
+        self.cartesian_max_step = float(
+            self.declare_parameter("cartesian_max_step", 0.005).value
+        )
+        self.cartesian_jump_threshold = float(
+            self.declare_parameter("cartesian_jump_threshold", 0.0).value
+        )
+        self.cartesian_revolute_jump_threshold = float(
+            self.declare_parameter("cartesian_revolute_jump_threshold", 0.0).value
+        )
+        self.cartesian_prismatic_jump_threshold = float(
+            self.declare_parameter("cartesian_prismatic_jump_threshold", 0.0).value
+        )
+        self.cartesian_min_fraction = float(
+            self.declare_parameter("cartesian_min_fraction", 0.999).value
+        )
+        self.grasp_final_extra_advance = float(
+            self.declare_parameter("grasp_final_extra_advance", 0.0).value
         )
         self.ik_link = self.declare_parameter("ik_link", "robotiq_hande_end").value
         self.grasp_pose_link = self.declare_parameter(
@@ -96,7 +129,7 @@ class MinimalGraspExecutor(Node):
             self.declare_parameter("max_ik_retries", 5).value
         )
         self.enable_octomap_freeze = bool(
-            self.declare_parameter("enable_octomap_freeze", True).value
+            self.declare_parameter("enable_octomap_freeze", False).value
         )
         self.pause_sam_during_pick = bool(
             self.declare_parameter("pause_sam_during_pick", True).value
@@ -126,6 +159,9 @@ class MinimalGraspExecutor(Node):
         self.open_gripper_max_effort = float(
             self.declare_parameter("open_gripper_max_effort", 0.0).value
         )
+        self.post_grasp_lift_z = float(
+            self.declare_parameter("post_grasp_lift_z", 0.10).value
+        )
         self.arm_joint_names = list(
             self.declare_parameter(
                 "arm_joint_names",
@@ -148,11 +184,10 @@ class MinimalGraspExecutor(Node):
         self.home_joint_positions = list(
             self.declare_parameter(
                 "home_joint_positions",
-                [0.8901, -1.0472, -2.0245, -1.0297, 1.4835, 0.0],
+                [0.872, -1.0995, -2.1118, -1.04719, 1.5009, 0.0],
             ).value
         )
 
-        self.table_top_z = 0.0
         self.min_target_z = 0.01
         self.goal_joint_tolerance = 1e-3
         self.ik_timeout = Duration(sec=0, nanosec=250_000_000)
@@ -173,7 +208,9 @@ class MinimalGraspExecutor(Node):
         self.current_gripper_phase = "idle"
         self.gripper_goal_active = False
         self.pending_grasp_goal_state = None
+        self.pending_grasp_target_pose = None
         self.pending_motion_log_label = ""
+        self.current_motion_uses_move_group_execution = False
         self.octomap_frozen = False
         self.sam_paused_for_pick = False
         self.octomap_restore_rate = None
@@ -207,6 +244,11 @@ class MinimalGraspExecutor(Node):
         self.ik_client = self.create_client(
             GetPositionIK,
             self.ik_service_name,
+            callback_group=self.moveit_cb_group,
+        )
+        self.cartesian_path_client = self.create_client(
+            GetCartesianPath,
+            self.cartesian_path_service_name,
             callback_group=self.moveit_cb_group,
         )
         self.grasp_client = self.create_client(
@@ -317,6 +359,13 @@ class MinimalGraspExecutor(Node):
             f"planner_id='{self.planner_id}', use_approach_stage={self.use_approach_stage}, "
             f"approach_axis='{self.approach_axis}', approach_offset={self.approach_offset:.3f}, "
             f"approach_sign={self.approach_sign:.1f}, "
+            f"approach_enable_replanning={self.approach_enable_replanning}, "
+            f"approach_replan_attempts={self.approach_replan_attempts}, "
+            f"approach_replan_delay={self.approach_replan_delay:.2f}, "
+            f"use_cartesian_for_grasp_final={self.use_cartesian_for_grasp_final}, "
+            f"cartesian_max_step={self.cartesian_max_step:.4f}, "
+            f"cartesian_min_fraction={self.cartesian_min_fraction:.3f}, "
+            f"grasp_final_extra_advance={self.grasp_final_extra_advance:.4f}, "
             f"top_grasps_topic='{self.top_grasps_topic}', "
             f"enable_octomap_freeze={self.enable_octomap_freeze}, "
             f"pause_sam_during_pick={self.pause_sam_during_pick}, "
@@ -517,12 +566,14 @@ class MinimalGraspExecutor(Node):
         co.primitives.append(
             SolidPrimitive(
                 type=SolidPrimitive.BOX,
-                dimensions=[1.0, 1.0, 0.05],
+                dimensions=[1.10, 1.10, 0.05],
             )
         )
 
         p = Pose()
-        p.position.z = -0.0255
+        p.position.z = -0.03
+        p.position.x = -0.19
+        p.position.y = -0.3
         p.orientation.x = 0.0
         p.orientation.y = 0.0
         p.orientation.z = 0.3894
@@ -713,7 +764,9 @@ class MinimalGraspExecutor(Node):
         self.current_gripper_phase = "idle"
         self.gripper_goal_active = False
         self.pending_grasp_goal_state = None
+        self.pending_grasp_target_pose = None
         self.pending_motion_log_label = ""
+        self.current_motion_uses_move_group_execution = False
         self.last_cycle_succeeded = success
         self.last_cycle_result_message = message or (
             "Ciclo completado correctamente"
@@ -975,6 +1028,14 @@ class MinimalGraspExecutor(Node):
         pose.orientation = base_pose.orientation
         return pose
 
+    def _offset_pose_along_world_z(self, base_pose: Pose, distance: float) -> Pose:
+        pose = Pose()
+        pose.position.x = base_pose.position.x
+        pose.position.y = base_pose.position.y
+        pose.position.z = base_pose.position.z + distance
+        pose.orientation = base_pose.orientation
+        return pose
+
     def _convert_pose_for_ik_link(self, target_pose: Pose) -> Pose:
         if self.grasp_pose_link == self.ik_link:
             return target_pose
@@ -985,6 +1046,31 @@ class MinimalGraspExecutor(Node):
             rclpy.time.Time(),
         )
         return self._compose_pose_with_offset(target_pose, transform.transform)
+
+    def _build_cartesian_grasp_pose(self, target_pose: Pose) -> Pose:
+        if self.grasp_final_extra_advance == 0.0:
+            return target_pose
+
+        return self._offset_pose_along_local_axis(
+            target_pose,
+            self.approach_axis,
+            -self.approach_sign * self.grasp_final_extra_advance,
+        )
+
+    def _build_post_grasp_lift_pose(self):
+        if self.pending_grasp_target_pose is None:
+            self.get_logger().error(
+                "No hay pose de grasp pendiente para calcular el lift post-grasp."
+            )
+            return None
+
+        if self.post_grasp_lift_z <= 0.0:
+            return self.pending_grasp_target_pose
+
+        return self._offset_pose_along_world_z(
+            self.pending_grasp_target_pose,
+            self.post_grasp_lift_z,
+        )
 
     def _normalize_goal_near_seed(self, goal_state: JointState, seed_state: JointState):
         normalized_positions = []
@@ -1075,6 +1161,65 @@ class MinimalGraspExecutor(Node):
         joint_state.position = [float(position) for position in positions]
         return joint_state
 
+    def _should_use_move_group_replanning(self, phase: str) -> bool:
+        return self.execute and phase == "approach" and self.approach_enable_replanning
+
+    def _advance_after_motion_success(self, phase: str):
+        if phase == "approach":
+            if self.pending_grasp_goal_state is None:
+                self.get_logger().error(
+                    "No hay objetivo de grasp final pendiente tras la aproximacion."
+                )
+                self._finish_cycle()
+                return
+            if (
+                self.use_cartesian_for_grasp_final
+                and self.pending_grasp_target_pose is not None
+            ):
+                if not self._send_cartesian_grasp_goal(
+                    self.pending_grasp_target_pose,
+                    "grasp final cartesiano",
+                ):
+                    self._finish_cycle()
+                return
+            self._send_joint_goal(
+                self.pending_grasp_goal_state,
+                "grasp",
+                "grasp final",
+            )
+        elif phase == "grasp":
+            self._send_gripper_goal(
+                self.close_gripper_position,
+                self.close_gripper_max_effort,
+                "after_close",
+                "cerrar grasp",
+            )
+        elif phase == "post_grasp_lift":
+            self._send_joint_goal(
+                self._joint_state_from_positions(self.place_joint_positions),
+                "place",
+                "deposito/place",
+            )
+        elif phase == "place":
+            self._send_gripper_goal(
+                self.open_gripper_position,
+                self.open_gripper_max_effort,
+                "after_open",
+                "soltar objeto",
+            )
+        elif phase == "home":
+            self.get_logger().info(
+                "Robot en home. Verificando apertura del gripper antes de cerrar el ciclo."
+            )
+            self._send_gripper_goal(
+                self.open_gripper_position,
+                self.open_gripper_max_effort,
+                "verify_open_at_home",
+                "verificar gripper abierto en home",
+            )
+        else:
+            self._finish_cycle()
+
     def _send_joint_goal(self, goal_joint_state: JointState, phase: str, log_label: str):
         if self.latest_arm_joint_state is None:
             self.get_logger().warn(
@@ -1097,10 +1242,16 @@ class MinimalGraspExecutor(Node):
         req.max_velocity_scaling_factor = 0.1
         req.max_acceleration_scaling_factor = 0.1
         req.goal_constraints.append(self._build_joint_goal_constraints(goal_joint_state))
-        goal.planning_options.plan_only = True
+        use_move_group_execution = self._should_use_move_group_replanning(phase)
+        goal.planning_options.plan_only = not use_move_group_execution
+        goal.planning_options.replan = use_move_group_execution
+        if use_move_group_execution:
+            goal.planning_options.replan_attempts = self.approach_replan_attempts
+            goal.planning_options.replan_delay = self.approach_replan_delay
 
         self.current_motion_phase = phase
         self.pending_motion_log_label = log_label
+        self.current_motion_uses_move_group_execution = use_move_group_execution
         self.action_client.wait_for_server()
         send_goal_future = self.action_client.send_goal_async(goal)
         send_goal_future.add_done_callback(self._on_move_group_response)
@@ -1113,8 +1264,82 @@ class MinimalGraspExecutor(Node):
             f"Planificacion solicitada para {log_label}. "
             f"pipeline='{self.planning_pipeline or 'default'}' | "
             f"planner_id='{self.planner_id or 'default'}' | "
+            f"move_group_execution={use_move_group_execution} | "
+            f"replan={goal.planning_options.replan} | "
             f"q_goal=[{q_goal}]"
         )
+
+    def _send_cartesian_pose_goal(
+        self,
+        target_pose: Pose,
+        phase: str,
+        log_label: str,
+    ) -> bool:
+        if self.latest_arm_joint_state is None:
+            self.get_logger().error(
+                f"No hay /joint_states completos del brazo para {log_label}."
+            )
+            return False
+
+        if not self.cartesian_path_client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().error(
+                f"Servicio cartesiano '{self.cartesian_path_service_name}' no disponible."
+            )
+            return False
+
+        request = GetCartesianPath.Request()
+        request.header.frame_id = self.target_frame
+        request.header.stamp = self.get_clock().now().to_msg()
+        request.start_state = self._robot_state_from_joint_state(
+            self.latest_arm_joint_state
+        )
+        request.group_name = self.group_name
+        request.link_name = self.grasp_pose_link
+        request.waypoints = [target_pose]
+        request.max_step = self.cartesian_max_step
+        request.jump_threshold = self.cartesian_jump_threshold
+        request.revolute_jump_threshold = self.cartesian_revolute_jump_threshold
+        request.prismatic_jump_threshold = self.cartesian_prismatic_jump_threshold
+        request.avoid_collisions = True
+
+        future = self.cartesian_path_client.call_async(request)
+        response = self._wait_for_future_result(future, timeout_sec=5.0)
+        if response is None:
+            self.get_logger().error(
+                f"Timeout calculando path cartesiano para {log_label}."
+            )
+            return False
+
+        if response.error_code.val != MoveItErrorCodes.SUCCESS:
+            self.get_logger().error(
+                f"GetCartesianPath fallo para {log_label}. "
+                f"error_code={response.error_code.val}, fraction={response.fraction:.3f}"
+            )
+            return False
+
+        if response.fraction < self.cartesian_min_fraction:
+            self.get_logger().error(
+                f"Path cartesiano incompleto para {log_label}: "
+                f"fraction={response.fraction:.3f} < {self.cartesian_min_fraction:.3f}"
+            )
+            return False
+
+        self.current_motion_phase = phase
+        self.pending_motion_log_label = log_label
+        self.get_logger().info(
+            f"Path cartesiano listo para {log_label}: "
+            f"fraction={response.fraction:.3f}, max_step={self.cartesian_max_step:.4f}, "
+            f"link_name='{self.grasp_pose_link}'"
+        )
+        self._execute_planned_trajectory(
+            response.solution,
+            phase,
+            log_label,
+        )
+        return True
+
+    def _send_cartesian_grasp_goal(self, target_pose: Pose, log_label: str) -> bool:
+        return self._send_cartesian_pose_goal(target_pose, "grasp", log_label)
 
     def _send_gripper_goal(
         self,
@@ -1206,14 +1431,21 @@ class MinimalGraspExecutor(Node):
             if error_code == MoveItErrorCodes.SUCCESS:
                 phase = self.current_motion_phase
                 log_label = self.pending_motion_log_label or phase
-                self.get_logger().info(
-                    f"Plan generado correctamente en fase '{phase}' para {log_label}."
-                )
-                self._execute_planned_trajectory(
-                    result_wrapper.result.planned_trajectory,
-                    phase,
-                    log_label,
-                )
+                if self.current_motion_uses_move_group_execution:
+                    self.get_logger().info(
+                        f"MoveGroup completo planificacion+ejecucion en fase '{phase}' "
+                        f"para {log_label} con replanificacion activa."
+                    )
+                    self._advance_after_motion_success(phase)
+                else:
+                    self.get_logger().info(
+                        f"Plan generado correctamente en fase '{phase}' para {log_label}."
+                    )
+                    self._execute_planned_trajectory(
+                        result_wrapper.result.planned_trajectory,
+                        phase,
+                        log_label,
+                    )
             else:
                 self.get_logger().error(
                     f"Fallo al planificar la trayectoria en fase '{self.current_motion_phase}'. "
@@ -1266,42 +1498,7 @@ class MinimalGraspExecutor(Node):
             self.get_logger().info(
                 f"Trayectoria ejecutada correctamente en fase '{phase}'."
             )
-
-            if phase == "approach":
-                if self.pending_grasp_goal_state is None:
-                    self.get_logger().error(
-                        "No hay objetivo de grasp final pendiente tras la aproximacion."
-                    )
-                    self._finish_cycle()
-                    return
-                self._send_joint_goal(
-                    self.pending_grasp_goal_state,
-                    "grasp",
-                    "grasp final",
-                )
-            elif phase == "grasp":
-                self._send_gripper_goal(
-                    self.close_gripper_position,
-                    self.close_gripper_max_effort,
-                    "after_close",
-                    "cerrar grasp",
-                )
-            elif phase == "place":
-                self._send_gripper_goal(
-                    self.open_gripper_position,
-                    self.open_gripper_max_effort,
-                    "after_open",
-                    "soltar objeto",
-                )
-            elif phase == "home":
-                self._clear_octomap("llegada a home")
-                self.get_logger().info("Ciclo grasp->place->home completado.")
-                self._finish_cycle(
-                    success=True,
-                    message="Ciclo grasp->place->home completado",
-                )
-            else:
-                self._finish_cycle()
+            self._advance_after_motion_success(phase)
         except Exception as e:
             self.get_logger().error(
                 f"Error procesando resultado de ExecuteTrajectory: {e}"
@@ -1345,16 +1542,30 @@ class MinimalGraspExecutor(Node):
             )
 
             if phase == "after_close":
-                self._send_joint_goal(
-                    self._joint_state_from_positions(self.place_joint_positions),
-                    "place",
-                    "deposito/place",
-                )
+                lift_target_pose = self._build_post_grasp_lift_pose()
+                if lift_target_pose is None:
+                    self._finish_cycle()
+                    return
+
+                if not self._send_cartesian_pose_goal(
+                    lift_target_pose,
+                    "post_grasp_lift",
+                    "lift vertical post-grasp",
+                ):
+                    self._finish_cycle()
             elif phase == "after_open":
                 self._send_joint_goal(
                     self._joint_state_from_positions(self.home_joint_positions),
                     "home",
                     "home",
+                )
+            elif phase == "verify_open_at_home":
+                self.get_logger().info(
+                    "Ciclo grasp->place->home completado con gripper verificado en abierto."
+                )
+                self._finish_cycle(
+                    success=True,
+                    message="Ciclo grasp->place->home completado con gripper abierto en home",
                 )
             else:
                 self._finish_cycle()
@@ -1451,6 +1662,9 @@ class MinimalGraspExecutor(Node):
                 goal_joint_state, joint_distance = goal_state_info
                 self.current_retry_count = 0
                 self.pending_grasp_goal_state = goal_joint_state
+                self.pending_grasp_target_pose = self._build_cartesian_grasp_pose(
+                    target_pose
+                )
 
                 if self.use_approach_stage and self.approach_offset > 0.0:
                     approach_target_pose = self._offset_pose_along_local_axis(

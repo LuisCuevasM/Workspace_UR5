@@ -19,7 +19,7 @@ def generate_launch_description():
         .trajectory_execution(file_path="config/moveit_controllers.yaml")
         .planning_pipelines(
             pipelines=["ompl", "ntfields"],
-            default_planning_pipeline="ntfields",
+            default_planning_pipeline="ompl",
         )
         .to_moveit_configs()
     )
@@ -54,7 +54,7 @@ def generate_launch_description():
     ntfields_pipeline_params = {
         "ntfields": {
             "planning_plugin": "moveit_ntfields_planner/NTFieldsPlanner",
-            "planner_url": "http://172.19.0.2:8888/plan",
+            "planner_url": os.environ.get("NTFIELDS_PLANNER_URL", "http://localhost:8888/plan"),
             "request_timeout": 60.0,
             "default_dt": 0.15,
             "interpolation_steps": 10,
@@ -87,7 +87,7 @@ def generate_launch_description():
         output="screen",
         parameters=[
             moveit_config.to_dict(),
-            {"default_planning_pipeline": "ntfields"},
+            {"default_planning_pipeline": "ompl"},
             ompl_pipeline_params,
             ntfields_pipeline_params,
             chomp_config,       # ← parámetros que lee el OptimizerAdapter

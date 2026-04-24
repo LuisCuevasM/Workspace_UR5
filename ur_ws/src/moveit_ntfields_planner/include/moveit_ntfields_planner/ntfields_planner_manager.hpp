@@ -37,7 +37,7 @@ private:
   std::string parameter_namespace_;
   std::string group_name_ = "ur_arm";
   std::string planner_id_ = "NTFieldsJointInterpolation";
-  std::string planner_url_ = "http://172.19.0.2:8888/plan";
+  std::string planner_url_ = "http://localhost:8888/plan";
   double request_timeout_ = 60.0;
   double default_dt_ = 0.15;
   std::size_t interpolation_steps_ = 10;
