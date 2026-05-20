@@ -1,5 +1,6 @@
 #include "robotiq_hande_driver/hande_gripper.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 namespace robotiq_hande_driver {
@@ -80,16 +81,25 @@ double HandeGripper::get_position() const {
     return position_;
 }
 
-void HandeGripper::set_position(double position, double force) {
+void HandeGripper::set_position(double position, double velocity, double force) {
     static double prev_position = std::numeric_limits<double>::quiet_NaN();
+    static double prev_velocity = std::numeric_limits<double>::quiet_NaN();
+    static double prev_force = std::numeric_limits<double>::quiet_NaN();
 
-    if(!std::isnan(prev_position) && std::fabs(position - prev_position) < EPSILON) return;
+    if(!std::isnan(prev_position) && !std::isnan(prev_velocity) && !std::isnan(prev_force)
+       && std::fabs(position - prev_position) < EPSILON
+       && std::fabs(velocity - prev_velocity) < EPSILON && std::fabs(force - prev_force) < EPSILON)
+        return;
     prev_position = position;
+    prev_velocity = velocity;
+    prev_force = force;
 
     uint8_t scaled_position = (gripper_position_max_ - position) / gripper_postion_step_;
-    uint8_t scaled_force = static_cast<uint8_t>(force * MAX_FORCE);
+    uint8_t scaled_velocity =
+        static_cast<uint8_t>(std::clamp(velocity, 0.0, 1.0) * MAX_SPEED);
+    uint8_t scaled_force = static_cast<uint8_t>(std::clamp(force, 0.0, 1.0) * MAX_FORCE);
 
-    prot_.go_to(scaled_position, MAX_SPEED, scaled_force);
+    prot_.go_to(scaled_position, scaled_velocity, scaled_force);
 }
 
 double HandeGripper::get_current() const {

@@ -30,7 +30,7 @@ install(PROGRAMS
 
 # 3. Instalar directorios de recursos
 install(
-  DIRECTORY urdf models config rviz worlds launch
+  DIRECTORY urdf models config rviz launch
   DESTINATION share/${PROJECT_NAME}
 )
 

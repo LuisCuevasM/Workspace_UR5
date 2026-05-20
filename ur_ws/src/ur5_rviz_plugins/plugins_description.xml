@@ -1,0 +1,10 @@
+<library path="ur5_rviz_plugins">
+  <class
+    name="ur5_rviz_plugins/GraspControlPanel"
+    type="ur5_rviz_plugins::GraspControlPanel"
+    base_class_type="rviz_common::Panel">
+    <description>
+      Panel for calling the UR5 grasp preparation and execution services.
+    </description>
+  </class>
+</library>

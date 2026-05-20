@@ -6,6 +6,8 @@ import matplotlib.pyplot as plt
 import torch
 import cv2
 import time
+import os
+import tempfile
 
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 from sensor_msgs_py import point_cloud2
@@ -14,8 +16,7 @@ from std_srvs.srv import Trigger
 from cv_bridge import CvBridge
 from message_filters import Subscriber, ApproximateTimeSynchronizer
 
-from sam2.build_sam import build_sam2
-from sam2.sam2_image_predictor import SAM2ImagePredictor
+from sam2.build_sam import build_sam2_video_predictor
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torchvision")
@@ -38,6 +39,27 @@ def downsample_points(pts, max_points):
 
     idx = np.random.permutation(pts.shape[0])[:max_points]
     return pts[idx]
+
+
+def box_from_mask(mask, margin_px, image_shape):
+    ys, xs = np.where(mask)
+    if xs.size == 0:
+        return None
+
+    height, width = image_shape[:2]
+    x1 = max(0, int(xs.min()) - margin_px)
+    y1 = max(0, int(ys.min()) - margin_px)
+    x2 = min(width - 1, int(xs.max()) + margin_px)
+    y2 = min(height - 1, int(ys.max()) + margin_px)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return np.array([x1, y1, x2, y2], dtype=np.float32)
+
+
+def smooth_box(previous_box, new_box, alpha):
+    if previous_box is None:
+        return new_box
+    return (1.0 - alpha) * previous_box + alpha * new_box
 
 
 def select_click(rgb):
@@ -146,13 +168,28 @@ class Sam2ServiceNode(Node):
         self.processing_active = False # Controla si SAM2 debe ejecutarse
         self.selection_in_progress = False
         self.object_exclusion_radius_px = 12
+        self.auto_update_prompt_box = True
+        self.prompt_box_margin_px = 25
+        self.prompt_box_smoothing_alpha = 0.65
+        self.min_mask_score = 0.20
+        self.video_obj_id = 1
+        self.video_max_frames = 12
+        self.video_rgb_frames = []
+        self.video_frame_stamps = []
+        self.video_frame_dir = tempfile.mkdtemp(prefix="sam2_video_frames_", dir="/tmp")
+        self.video_prompt_box = None
+        self.video_prompt_points = None
+        self.video_prompt_labels = None
 
         # Carga de modelo (se mantiene)
         checkpoint = "/workspace/sam2/checkpoints/sam2.1_hiera_base_plus.pt"
         model_cfg  = "configs/sam2.1/sam2.1_hiera_b+.yaml"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = build_sam2(model_cfg, checkpoint, device=self.device)
-        self.predictor = SAM2ImagePredictor(self.model)
+        self.predictor = build_sam2_video_predictor(
+            model_cfg,
+            checkpoint,
+            device=self.device,
+        )
         self.bridge = CvBridge()
 
         # Publicadores
@@ -229,6 +266,8 @@ class Sam2ServiceNode(Node):
                 return response
 
             self.prompt_box = np.array(box, dtype=np.float32)
+            self.last_good_prompt_box = self.prompt_box.copy()
+            self.reset_video_tracking(self.latest_rgb, self.latest_rgb_msg.header.stamp)
             self.processing_active = True # Activamos el procesamiento en el callback
             if not self.run_inference_cycle():
                 self.processing_active = False
@@ -273,6 +312,95 @@ class Sam2ServiceNode(Node):
         response.message = "SAM2 reanudado correctamente."
         return response
 
+    def stamp_key(self, stamp):
+        return (stamp.sec, stamp.nanosec)
+
+    def reset_video_tracking(self, rgb, stamp):
+        self.video_prompt_box = self.prompt_box.copy()
+        x1, y1, x2, y2 = self.video_prompt_box
+        self.video_prompt_points = np.array(
+            [[0.5 * (x1 + x2), 0.5 * (y1 + y2)]],
+            dtype=np.float32,
+        )
+        self.video_prompt_labels = np.array([1], dtype=np.int32)
+        self.video_rgb_frames = [rgb.copy()]
+        self.video_frame_stamps = [self.stamp_key(stamp)]
+
+    def append_video_frame_if_new(self):
+        stamp = self.stamp_key(self.latest_rgb_msg.header.stamp)
+        if self.video_frame_stamps and self.video_frame_stamps[-1] == stamp:
+            return
+
+        self.video_rgb_frames.append(self.latest_rgb.copy())
+        self.video_frame_stamps.append(stamp)
+
+        if len(self.video_rgb_frames) > self.video_max_frames:
+            self.video_rgb_frames = [self.video_rgb_frames[0]] + self.video_rgb_frames[
+                -(self.video_max_frames - 1):
+            ]
+            self.video_frame_stamps = [self.video_frame_stamps[0]] + self.video_frame_stamps[
+                -(self.video_max_frames - 1):
+            ]
+
+    def write_video_frames(self):
+        os.makedirs(self.video_frame_dir, exist_ok=True)
+        for name in os.listdir(self.video_frame_dir):
+            if name.lower().endswith((".jpg", ".jpeg")):
+                os.remove(os.path.join(self.video_frame_dir, name))
+
+        for frame_idx, rgb in enumerate(self.video_rgb_frames):
+            path = os.path.join(self.video_frame_dir, f"{frame_idx:05d}.jpg")
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            if not cv2.imwrite(path, bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95]):
+                raise RuntimeError(f"No se pudo escribir frame SAM2: {path}")
+
+    def mask_from_video_predictor(self):
+        if self.video_prompt_box is None:
+            self.video_prompt_box = self.prompt_box.copy()
+        if self.video_prompt_points is None:
+            x1, y1, x2, y2 = self.video_prompt_box
+            self.video_prompt_points = np.array(
+                [[0.5 * (x1 + x2), 0.5 * (y1 + y2)]],
+                dtype=np.float32,
+            )
+            self.video_prompt_labels = np.array([1], dtype=np.int32)
+
+        self.append_video_frame_if_new()
+        self.write_video_frames()
+
+        with torch.inference_mode():
+            inference_state = self.predictor.init_state(video_path=self.video_frame_dir)
+            self.predictor.reset_state(inference_state)
+            _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
+                inference_state=inference_state,
+                frame_idx=0,
+                obj_id=self.video_obj_id,
+                points=self.video_prompt_points,
+                labels=self.video_prompt_labels,
+                box=self.video_prompt_box,
+            )
+
+            target_frame_idx = len(self.video_rgb_frames) - 1
+            if target_frame_idx > 0:
+                out_mask_logits = None
+                for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(
+                    inference_state,
+                    start_frame_idx=0,
+                    max_frame_num_to_track=target_frame_idx + 1,
+                ):
+                    if out_frame_idx == target_frame_idx:
+                        break
+
+        if out_mask_logits is None:
+            return None
+
+        obj_ids = list(out_obj_ids)
+        if self.video_obj_id not in obj_ids:
+            return None
+
+        obj_index = obj_ids.index(self.video_obj_id)
+        return (out_mask_logits[obj_index] > 0.0).cpu().numpy().squeeze()
+
     def run_inference_cycle(self):
         """ Ejecuta la lógica de SAM2 y publica la nube de puntos """
         if self.latest_rgb is None or not hasattr(self, "latest_depth_msg") or not hasattr(
@@ -283,15 +411,16 @@ class Sam2ServiceNode(Node):
             )
             return False
 
-        with torch.inference_mode():
-            self.predictor.set_image(self.latest_rgb)
-            masks, scores, _ = self.predictor.predict(
-                box=self.prompt_box,
-                multimask_output=False,
+        try:
+            mask = self.mask_from_video_predictor()
+        except Exception as exc:
+            self.get_logger().warn(
+                f"No se pudo correr SAM2 video predictor: {exc}"
             )
-
-        best = int(np.argmax(scores))
-        mask = masks[best] > 0.5
+            return False
+        if mask is None or not np.any(mask):
+            self.get_logger().warn("SAM2 video predictor no devolvio una mascara valida.")
+            return False
 
         if self.object_exclusion_radius_px > 0:
             k = 2 * self.object_exclusion_radius_px + 1
@@ -319,6 +448,24 @@ class Sam2ServiceNode(Node):
         if pts.shape[0] < 50:
             self.get_logger().warn(f"Too few masked depth pixels: {pts.shape[0]}")
             return False
+
+        if self.auto_update_prompt_box:
+            new_box = box_from_mask(
+                mask,
+                self.prompt_box_margin_px,
+                self.latest_rgb.shape,
+            )
+            if new_box is not None:
+                previous_box = getattr(self, "last_good_prompt_box", self.prompt_box)
+                self.prompt_box = smooth_box(
+                    previous_box,
+                    new_box,
+                    self.prompt_box_smoothing_alpha,
+                )
+                self.last_good_prompt_box = self.prompt_box.copy()
+                self.get_logger().debug(
+                    f"Prompt box actualizado por tracking: {self.prompt_box.tolist()}"
+                )
 
         # Publicar
         header = Header(stamp=self.latest_rgb_msg.header.stamp, frame_id=info.header.frame_id)

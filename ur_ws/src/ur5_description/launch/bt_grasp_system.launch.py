@@ -42,6 +42,8 @@ def generate_launch_description():
             "-p",
             "object_topic:=/sam2/object_cloud",
             "-p",
+            "scanned_object_topic:=/point_cloud_scanner/object_cloud_complete",
+            "-p",
             "scene_topic:=/sam2/scene_cloud_no_object",
             "-p",
             "infer_service_name:=/graspgen/run_inference",

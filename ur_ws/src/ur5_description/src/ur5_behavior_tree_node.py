@@ -548,6 +548,7 @@ class BTGraspCoordinator(Node):
                     max_attempts=self.max_retries,
                     logger=self.get_logger(),
                 ),
+                
             ],
         )
 

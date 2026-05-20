@@ -3,6 +3,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
     OpaqueFunction,
+    TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.substitutions import (
@@ -90,8 +91,10 @@ def launch_setup(context: LaunchContext) -> list[IncludeLaunchDescription]:
         preapre_control_node(),
         prepare_robot_state_publisher_node(),
         prepare_rviz_node(enable=LaunchConfiguration("launch_rviz")),
-        prepare_controller_spawner("joint_state_broadcaster"),
-        prepare_controller_spawner("gripper_action_controller"),
+        TimerAction(period=1.0, actions=[prepare_controller_spawner("joint_state_broadcaster")]),
+        TimerAction(period=2.0, actions=[prepare_controller_spawner("gripper_velocity_controller")]),
+        TimerAction(period=3.0, actions=[prepare_controller_spawner("gripper_force_controller")]),
+        TimerAction(period=4.0, actions=[prepare_controller_spawner("gripper_action_controller")]),
     ]
 
 
@@ -208,6 +211,3 @@ def prepare_controller_spawner(controller_name: str) -> Node:
             "--controller-manager", "/gripper/controller_manager",
         ],
     )
-
-
-

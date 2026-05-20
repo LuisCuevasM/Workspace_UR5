@@ -129,7 +129,7 @@ class HandeGripper {
      *
      * @param position The target position in meters.
      */
-    void set_position(double position, double force = 1.0);
+    void set_position(double position, double velocity = 1.0, double force = 1.0);
 
     /**
      * @brief Retrieves the electric current drawn by the gripper.

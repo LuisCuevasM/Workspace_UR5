@@ -62,6 +62,7 @@ class RobotiqHandeHardwareInterface : public HWI::SystemInterface {
 
     double gripper_position_min_;
     double gripper_position_max_;
+    double gripper_speed_max_;
 
     double state_position_;
     double state_velocity_;
@@ -72,9 +73,11 @@ class RobotiqHandeHardwareInterface : public HWI::SystemInterface {
     double read_current_;
 
     double cmd_position_;
+    double cmd_velocity_;
     double cmd_force_;
     std::mutex mtx_write_;
     double write_position_;
+    double write_velocity_;
     double write_force_;
 };
 

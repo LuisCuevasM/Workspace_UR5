@@ -8,6 +8,7 @@
 #include "hardware_interface/resource_manager.hpp"
 #include "hardware_interface/types/lifecycle_state_names.hpp"
 #include "lifecycle_msgs/msg/state.hpp"
+#include "rclcpp/rclcpp.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "ros2_control_test_assets/components_urdfs.hpp"
 #include "ros2_control_test_assets/descriptions.hpp"
@@ -20,6 +21,16 @@
 
 class TestHWInterface : public ::testing::Test {
    protected:
+    static void SetUpTestSuite() {
+        int argc = 0;
+        char** argv = nullptr;
+        rclcpp::init(argc, argv);
+    }
+
+    static void TearDownTestSuite() {
+        rclcpp::shutdown();
+    }
+
     void SetUp() override {
         hw_system_gripper_1dof_ =
             R"(
@@ -28,6 +39,7 @@ class TestHWInterface : public ::testing::Test {
                     <plugin>robotiq_hande_driver/RobotiqHandeHardwareInterface</plugin>
                     <param name="grip_pos_min">0.0</param>
                     <param name="grip_pos_max">0.025</param>
+                    <param name="grip_speed_max">0.15</param>
                     <param name="tty_port">/tmp/ttyUR</param>
                     <param name="baudrate">115200</param>
                     <param name="parity">N</param>
@@ -41,8 +53,13 @@ class TestHWInterface : public ::testing::Test {
                 </hardware>
                 <joint name="joint1">
                     <command_interface name="position"/>
+                    <command_interface name="velocity"/>
+                    <command_interface name="effort"/>
                     <state_interface name="position">
                         <param name="initial_value">0.025</param>
+                    </state_interface>
+                    <state_interface name="velocity">
+                        <param name="initial_value">0.0</param>
                     </state_interface>
                 </joint>
             </ros2_control>
@@ -71,5 +88,9 @@ class TestableResourceManager : public hardware_interface::ResourceManager {
 TEST_F(TestHWInterface, load_robotiq_hande_hardware_interface) {
     auto urdf = ros2_control_test_assets::urdf_head + hw_system_gripper_1dof_
                 + ros2_control_test_assets::urdf_tail;
-    ASSERT_NO_THROW(TestableResourceManager rm(urdf));
+    try {
+        TestableResourceManager rm(urdf);
+    } catch(const std::exception& e) {
+        FAIL() << e.what();
+    }
 }

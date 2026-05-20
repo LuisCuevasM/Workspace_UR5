@@ -1,0 +1,61 @@
+/**:
+  ros__parameters:
+    best_grasp_topic: /graspgen/best_grasp
+    scan_dwell_event_topic: /point_cloud_scanner/scan_dwell
+    target_frame: base_link
+    tcp_link: robotiq_hande_end
+
+    scan_radius: 0.2
+    scan_start_angle_deg: -20.0
+    scan_angle_deg: 140.0
+    scan_direction: right
+    scan_height_offset: 0.0
+    scan_waypoints: 6
+    scan_dwell_sec: 2.0
+    roll_offset_deg: 90.0
+
+point_cloud_scanner:
+  ros__parameters:
+    marker_topic: /point_cloud_scanner/scan_marker
+    input_cloud_topic: /sam2/object_cloud
+    complete_cloud_topic: /point_cloud_scanner/object_cloud_complete
+    capture_scan_service: /point_cloud_scanner/capture_scan
+    execute_scan_service: /point_cloud_scanner/execute_scan
+    infer_service_name: /graspgen/run_inference
+    auto_infer_after_scan: true
+    auto_infer_delay_sec: 0.5
+    line_width: 0.01
+    capture_duration_sec: 60.0
+    publish_period_sec: 0.5
+    sam_mask_settle_sec: 2.0
+    voxel_size: 0.003
+    crop_to_object: true
+    object_crop_radius: 0.35
+    max_accumulated_points: 250000
+    use_registration: true
+    registration_voxel_size: 0.005
+    icp_distance_threshold: 0.01
+    icp_max_iter: 50
+    ransac_max_iter: 100000
+    icp_fitness_threshold: 0.1
+    min_scan_points: 100
+
+scan_motion_executor:
+  ros__parameters:
+    execute_scan_service: /point_cloud_scanner/execute_scan
+    group_name: ur_arm
+    cartesian_path_service: /compute_cartesian_path
+    execute_trajectory_action: /execute_trajectory
+
+    look_at_object: true
+    look_at_axis: z
+
+    cartesian_max_step: 0.05
+    cartesian_jump_threshold: 0.0
+    cartesian_min_fraction: 0.85
+    max_velocity_scaling_factor: 0.3
+    max_acceleration_scaling_factor: 0.3
+    scan_dwell_joint_tolerance: 0.015
+    scan_dwell_confirm_sec: 0.3
+    scan_dwell_event_fallback_sec: 1.0
+    avoid_collisions: true

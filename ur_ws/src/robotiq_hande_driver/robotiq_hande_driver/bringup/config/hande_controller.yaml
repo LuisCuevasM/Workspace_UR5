@@ -11,6 +11,12 @@
       gripper_action_controller:
         type: position_controllers/GripperActionController
 
+      gripper_velocity_controller:
+        type: forward_command_controller/ForwardCommandController
+
+      gripper_force_controller:
+        type: forward_command_controller/ForwardCommandController
+
 
   gripper_action_controller:
     ros__parameters:
@@ -23,3 +29,15 @@
       stall_timeout: 1.0
       state_interfaces:
         - position
+
+  gripper_velocity_controller:
+    ros__parameters:
+      joints:
+        - robotiq_hande_left_finger_joint
+      interface_name: velocity
+
+  gripper_force_controller:
+    ros__parameters:
+      joints:
+        - robotiq_hande_left_finger_joint
+      interface_name: effort

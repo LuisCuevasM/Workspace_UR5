@@ -1,6 +1,9 @@
 #include "robotiq_hande_driver/hande_hardware_interface.hpp"
 #include "robotiq_hande_driver/utils.hpp"
 
+#include <algorithm>
+#include <cmath>
+
 #include <hardware_interface/types/hardware_interface_type_values.hpp>
 
 namespace robotiq_hande_driver {
@@ -33,6 +36,9 @@ HWI::CallbackReturn RobotiqHandeHardwareInterface::on_init(const HWI::HardwareIn
     th_comm_enabled_.store(false);
     gripper_position_min_ = std::stod(info_.hardware_parameters["grip_pos_min"]);
     gripper_position_max_ = std::stod(info_.hardware_parameters["grip_pos_max"]);
+    gripper_speed_max_ = info_.hardware_parameters.count("grip_speed_max")
+                             ? std::stod(info_.hardware_parameters["grip_speed_max"])
+                             : 0.15;
 
     auto frequency_hz = std::stoi(info_.hardware_parameters["frequency_hz"]);
     th_sleep_rate_ = std::chrono::milliseconds(1000 / frequency_hz);
@@ -74,7 +80,9 @@ HWI::CallbackReturn RobotiqHandeHardwareInterface::on_init(const HWI::HardwareIn
 
     cmd_force_ = 1.0;
     cmd_position_ = gripper_position_max_;
+    cmd_velocity_ = gripper_speed_max_;
     write_position_ = cmd_position_;
+    write_velocity_ = cmd_velocity_;
     write_force_ = cmd_force_;
 
     return HWI::CallbackReturn::SUCCESS;
@@ -85,6 +93,10 @@ void RobotiqHandeHardwareInterface::log_parsed_urdf_config() {
         get_logger(), "grip_pos_min: %s", info_.hardware_parameters["grip_pos_min"].c_str());
     RCLCPP_DEBUG(
         get_logger(), "grip_pos_max: %s", info_.hardware_parameters["grip_pos_max"].c_str());
+    if(info_.hardware_parameters.count("grip_speed_max")) {
+        RCLCPP_DEBUG(
+            get_logger(), "grip_speed_max: %s", info_.hardware_parameters["grip_speed_max"].c_str());
+    }
     RCLCPP_DEBUG(get_logger(), "tty_port: %s", info_.hardware_parameters["tty_port"].c_str());
     RCLCPP_DEBUG(get_logger(), "baudrate: %s", info_.hardware_parameters["baudrate"].c_str());
     RCLCPP_DEBUG(get_logger(), "parity: %s", info_.hardware_parameters["parity"].c_str());
@@ -176,6 +188,10 @@ std::vector<HWI::CommandInterface> RobotiqHandeHardwareInterface::export_command
         hardware_interface::HW_IF_POSITION,
         &cmd_position_));
     command_interfaces.emplace_back(hardware_interface::CommandInterface(
+        info_.joints[LEFT_FINGER_JOINT_ID].name,
+        hardware_interface::HW_IF_VELOCITY,
+        &cmd_velocity_));
+    command_interfaces.emplace_back(hardware_interface::CommandInterface(
         info_.joints[LEFT_FINGER_JOINT_ID].name, hardware_interface::HW_IF_EFFORT, &cmd_force_));
 
     return command_interfaces;
@@ -229,7 +245,12 @@ void RobotiqHandeHardwareInterface::gripper_communication() {
 
             {
                 std::lock_guard<std::mutex> lock(mtx_write_);
-                gripper_driver_.set_position(write_position_, write_force_);
+                double velocity_ratio = 1.0;
+                if(std::isfinite(write_velocity_) && write_velocity_ > 0.0
+                   && gripper_speed_max_ > 0.0) {
+                    velocity_ratio = std::clamp(write_velocity_ / gripper_speed_max_, 0.0, 1.0);
+                }
+                gripper_driver_.set_position(write_position_, velocity_ratio, write_force_);
             }
             gripper_driver_.write();
 
@@ -302,6 +323,7 @@ HWI::return_type RobotiqHandeHardwareInterface::write(
     std::lock_guard<std::mutex> lock(mtx_write_);
 
     write_position_ = cmd_position_;
+    write_velocity_ = cmd_velocity_;
     write_force_ = cmd_force_;
 
     return hardware_interface::return_type::OK;

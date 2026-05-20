@@ -122,6 +122,7 @@ class GraspGenCollisionNode(Node):
         super().__init__("graspgen_collision_node")
 
         self.declare_parameter("object_topic", "/sam2/object_cloud")
+        self.declare_parameter("scanned_object_topic", "/point_cloud_scanner/object_cloud_complete")
         self.declare_parameter("scene_topic", "/camera/camera/depth/color/points")
         self.declare_parameter("gripper_config", "")
         self.declare_parameter("grasp_threshold", 0.6)
@@ -148,9 +149,12 @@ class GraspGenCollisionNode(Node):
         self.gripper_collision_mesh = self.gripper_info.collision_mesh
 
         self.object_pc = None
+        self.scanned_object_pc = None
         self.scene_pc = None
         self.frame_id = None
+        self.scanned_frame_id = None
         self.cloud_stamp = None
+        self.scanned_cloud_stamp = None
         self.cached_best_grasp = None
         self.cached_best_score = None
         self.inference_busy = False
@@ -168,6 +172,13 @@ class GraspGenCollisionNode(Node):
             PointCloud2,
             self.get_parameter("object_topic").value,
             self.object_callback,
+            10
+        )
+
+        self.create_subscription(
+            PointCloud2,
+            self.get_parameter("scanned_object_topic").value,
+            self.scanned_object_callback,
             10
         )
 
@@ -191,6 +202,8 @@ class GraspGenCollisionNode(Node):
         self.get_logger().info(
             "GraspGen collision node ready "
             f"(auto_infer={self.get_parameter('auto_infer').value}, "
+            f"object_topic='{self.get_parameter('object_topic').value}', "
+            f"scanned_object_topic='{self.get_parameter('scanned_object_topic').value}', "
             f"service='{self.get_parameter('infer_service_name').value}')"
         )
 
@@ -201,16 +214,35 @@ class GraspGenCollisionNode(Node):
         if pc is not None:
             self.object_pc = pc
 
+    def scanned_object_callback(self, msg):
+        self.scanned_frame_id = msg.header.frame_id
+        self.scanned_cloud_stamp = msg.header.stamp
+        pc = pointcloud2_to_xyz(msg)
+        if pc is not None:
+            self.scanned_object_pc = pc
+
+    def get_active_object_cloud(self):
+        if self.scanned_object_pc is not None:
+            return (
+                self.scanned_object_pc,
+                self.scanned_frame_id,
+                self.scanned_cloud_stamp,
+                "scanner",
+            )
+
+        return self.object_pc, self.frame_id, self.cloud_stamp, "sam"
+
     def scene_callback(self, msg):
         pc = pointcloud2_to_xyz(msg)
         if pc is not None:
             self.scene_pc = pc
 
     def _compute_and_publish_best_grasp(self):
-        if self.object_pc is None or self.scene_pc is None:
+        object_pc, frame_id, cloud_stamp, object_source = self.get_active_object_cloud()
+
+        if object_pc is None or self.scene_pc is None:
             return False, "No hay pointcloud de objeto o escena disponible"
 
-        object_pc = self.object_pc
         scene_pc = self.scene_pc
 
         publish_all = self.get_parameter("publish_all_grasps").value
@@ -281,13 +313,13 @@ class GraspGenCollisionNode(Node):
 
         best_grasp = top_free[0].copy()
         best_score = float(top_free_conf[0])
-        best_source = "current"
+        best_source = object_source
         self.cached_best_grasp = best_grasp.copy()
         self.cached_best_score = best_score
 
         header = Header()
-        header.stamp = self.cloud_stamp if self.cloud_stamp is not None else self.get_clock().now().to_msg()
-        header.frame_id = self.frame_id
+        header.stamp = cloud_stamp if cloud_stamp is not None else self.get_clock().now().to_msg()
+        header.frame_id = frame_id
 
         top_pose_array = PoseArray()
         top_pose_array.header = header
