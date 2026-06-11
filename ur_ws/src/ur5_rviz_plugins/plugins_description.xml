@@ -7,4 +7,20 @@
       Panel for calling the UR5 grasp preparation and execution services.
     </description>
   </class>
+  <class
+    name="ur5_rviz_plugins/ObjectDetectedPanel"
+    type="ur5_rviz_plugins::ObjectDetectedPanel"
+    base_class_type="rviz_common::Panel">
+    <description>
+      Real-time color indicator for the Hand-E gripper object-detection sensor.
+    </description>
+  </class>
+  <class
+    name="ur5_rviz_plugins/SkillControlPanel"
+    type="ur5_rviz_plugins::SkillControlPanel"
+    base_class_type="rviz_common::Panel">
+    <description>
+      Panel for testing the UR5 robot skills (grasp/pick/place/pick_place/push/handover).
+    </description>
+  </class>
 </library>

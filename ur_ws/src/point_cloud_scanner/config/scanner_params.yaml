@@ -1,7 +1,9 @@
 /**:
   ros__parameters:
     best_grasp_topic: /graspgen/best_grasp
-    scan_dwell_event_topic: /point_cloud_scanner/scan_dwell
+    scan_dwell_event_topic: /point_cloud_scanner/scan_dwell   # motion -> scanner: "llegue al punto i"
+    capture_done_topic: /point_cloud_scanner/capture_done     # scanner -> motion: "foto guardada, continua"
+    scan_event_topic: /point_cloud_scanner/scan_event         # motion -> scanner: scan_finished / at_home
     target_frame: base_link
     tcp_link: robotiq_hande_end
 
@@ -10,8 +12,9 @@
     scan_angle_deg: 140.0
     scan_direction: right
     scan_height_offset: 0.0
-    scan_waypoints: 6
+    scan_waypoints: 8
     scan_dwell_sec: 2.0
+    scan_dwell_skip_count: 2  # no pausar/capturar en los primeros N waypoints
     roll_offset_deg: 90.0
 
 point_cloud_scanner:
@@ -26,6 +29,7 @@ point_cloud_scanner:
     auto_infer_delay_sec: 0.5
     line_width: 0.01
     capture_duration_sec: 60.0
+    capture_safety_timeout_sec: 300.0  # red de seguridad si nunca llega 'at_home'
     publish_period_sec: 0.5
     sam_mask_settle_sec: 2.0
     voxel_size: 0.003
@@ -39,6 +43,8 @@ point_cloud_scanner:
     ransac_max_iter: 100000
     icp_fitness_threshold: 0.1
     min_scan_points: 100
+    camera_frame: ""
+    allow_latest_tf_fallback: false
 
 scan_motion_executor:
   ros__parameters:
@@ -55,7 +61,25 @@ scan_motion_executor:
     cartesian_min_fraction: 0.85
     max_velocity_scaling_factor: 0.3
     max_acceleration_scaling_factor: 0.3
-    scan_dwell_joint_tolerance: 0.015
-    scan_dwell_confirm_sec: 0.3
-    scan_dwell_event_fallback_sec: 1.0
     avoid_collisions: true
+
+    # Handshake por segmento
+    capture_ack_timeout_sec: 15.0   # si el scanner no confirma, continua igual
+
+    # Retorno a home al terminar el arco (MoveGroup, espacio de juntas)
+    return_home_after_scan: true
+    move_action_name: /move_action
+    planning_pipeline: ompl
+    planner_id: RRTConnectkConfigDefault
+    home_allowed_planning_time: 10.0
+    home_goal_joint_tolerance: 0.001
+    home_velocity_scaling_factor: 0.2
+    home_acceleration_scaling_factor: 0.2
+    home_joint_positions: [0.8901, -1.0472, -2.0245, -1.0297, 1.4835, 3.3335]
+    arm_joint_names:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint

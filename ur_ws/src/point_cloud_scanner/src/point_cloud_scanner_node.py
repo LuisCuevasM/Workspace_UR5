@@ -13,7 +13,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from rclpy.time import Time
 from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import Header, Int32
+from std_msgs.msg import Header, Int32, String
 from std_srvs.srv import Trigger
 from tf2_geometry_msgs import do_transform_pose
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -34,6 +34,8 @@ class PointCloudScannerNode(Node):
         self.declare_parameter("auto_infer_after_scan", True)
         self.declare_parameter("auto_infer_delay_sec", 0.5)
         self.declare_parameter("scan_dwell_event_topic", "/point_cloud_scanner/scan_dwell")
+        self.declare_parameter("capture_done_topic", "/point_cloud_scanner/capture_done")
+        self.declare_parameter("scan_event_topic", "/point_cloud_scanner/scan_event")
         self.declare_parameter("target_frame", "base_link")
         self.declare_parameter("tcp_link", "robotiq_hande_end")
         self.declare_parameter("scan_radius", 0.2)
@@ -45,6 +47,7 @@ class PointCloudScannerNode(Node):
         self.declare_parameter("line_width", 0.01)
         self.declare_parameter("roll_offset_deg", 90.0)
         self.declare_parameter("capture_duration_sec", 12.0)
+        self.declare_parameter("capture_safety_timeout_sec", 300.0)
         self.declare_parameter("publish_period_sec", 0.5)
         self.declare_parameter("sam_mask_settle_sec", 1.0)
         self.declare_parameter("voxel_size", 0.003)
@@ -59,6 +62,8 @@ class PointCloudScannerNode(Node):
         self.declare_parameter("ransac_max_iter", 100000)
         self.declare_parameter("icp_fitness_threshold", 0.1)
         self.declare_parameter("min_scan_points", 100)
+        self.declare_parameter("camera_frame", "")
+        self.declare_parameter("allow_latest_tf_fallback", False)
 
         self.best_grasp_topic = self.get_parameter("best_grasp_topic").value
         self.marker_topic = self.get_parameter("marker_topic").value
@@ -68,6 +73,8 @@ class PointCloudScannerNode(Node):
         self.execute_scan_service = self.get_parameter("execute_scan_service").value
         self.infer_service_name = self.get_parameter("infer_service_name").value
         self.scan_dwell_event_topic = self.get_parameter("scan_dwell_event_topic").value
+        self.capture_done_topic = self.get_parameter("capture_done_topic").value
+        self.scan_event_topic = self.get_parameter("scan_event_topic").value
         self.target_frame = self.get_parameter("target_frame").value
         self.tcp_link = self.get_parameter("tcp_link").value
 
@@ -97,6 +104,11 @@ class PointCloudScannerNode(Node):
             self.complete_cloud_topic,
             10,
         )
+        self.capture_done_pub = self.create_publisher(
+            Int32,
+            self.capture_done_topic,
+            10,
+        )
         self.latest_grasp = None
         self.object_center = None
         self.capture_active = False
@@ -107,10 +119,12 @@ class PointCloudScannerNode(Node):
         self.latest_cloud_frame = ""
         self.dwell_events_received = 0
         self.snapshot_attempts = 0
+        self.arc_finished = False
         # Accumulated model as a single Open3D PointCloud
         self.model_o3d = None
         self.model_scan_count = 0
         self.model_has_rgb = False
+        self.scan_camera_poses = []   # TF de cámara por cada scan exitoso
         self.auto_infer_timers = []
 
         self.create_subscription(
@@ -131,6 +145,13 @@ class PointCloudScannerNode(Node):
             Int32,
             self.scan_dwell_event_topic,
             self._on_scan_dwell_event,
+            10,
+            callback_group=self.cb_group,
+        )
+        self.create_subscription(
+            String,
+            self.scan_event_topic,
+            self._on_scan_event,
             10,
             callback_group=self.cb_group,
         )
@@ -194,7 +215,10 @@ class PointCloudScannerNode(Node):
 
         self.object_center = center
         self._reset_accumulator()
-        duration = max(0.5, float(self.get_parameter("capture_duration_sec").value))
+        # Red de seguridad: el flujo normal lo cierra el evento 'at_home' del
+        # motion. Con el handshake por segmento el scan dura mucho mas que una
+        # sola captura, asi que el timeout debe ser holgado.
+        duration = max(0.5, float(self.get_parameter("capture_safety_timeout_sec").value))
         self.capture_until = self.get_clock().now() + Duration(seconds=duration)
         self.expected_captures = max(1, int(self.get_parameter("scan_waypoints").value))
         self.capture_active = True
@@ -203,8 +227,8 @@ class PointCloudScannerNode(Node):
             future = self.motion_client.call_async(Trigger.Request())
             future.add_done_callback(self._on_motion_started)
             response.message = (
-                f"Captura por eventos iniciada: esperando {self.expected_captures} "
-                f"fotos de nube durante {duration:.1f}s."
+                f"Captura por eventos iniciada: esperando fotos por handshake "
+                f"(timeout de seguridad {duration:.1f}s)."
             )
         else:
             self.capture_active = False
@@ -242,7 +266,7 @@ class PointCloudScannerNode(Node):
         self.latest_cloud_frame = msg.header.frame_id
 
     def _on_scan_dwell_event(self, msg):
-        if not self.capture_active:
+        if not self.capture_active or self.arc_finished:
             return
         self.dwell_events_received += 1
         settle_sec = max(0.0, float(self.get_parameter("sam_mask_settle_sec").value))
@@ -261,14 +285,18 @@ class PointCloudScannerNode(Node):
             )
             return False
 
-        transformed = self._cloud_to_target_arrays(self.latest_cloud_msg)
+        cloud_msg = self.latest_cloud_msg
+        transformed = self._cloud_to_target_arrays(
+            cloud_msg,
+            return_transform=True,
+        )
         if transformed is None:
             self.get_logger().warn(
                 f"No pude transformar/leer la nube del punto {scan_index + 1}. "
-                f"frame_entrada='{self.latest_cloud_msg.header.frame_id}'."
+                f"frame_entrada='{cloud_msg.header.frame_id}'."
             )
             return False
-        xyz, rgb = transformed
+        xyz, rgb, camera_tf = transformed
         if xyz.size == 0:
             self.get_logger().warn(
                 f"La nube del punto {scan_index + 1} no tiene puntos validos antes del crop."
@@ -293,10 +321,23 @@ class PointCloudScannerNode(Node):
         ok = self._register_and_fuse(xyz, rgb)
         if ok:
             n_model = len(self.model_o3d.points) if self.model_o3d is not None else 0
-            self.get_logger().info(
-                f"Scan {scan_index + 1}: {xyz.shape[0]} pts entrada → "
-                f"modelo con {n_model} pts ({self.model_scan_count} scans fusionados)."
-            )
+            if camera_tf is not None:
+                t = camera_tf.transform.translation
+                cloud_stamp = cloud_msg.header.stamp
+                tf_stamp = camera_tf.header.stamp
+                self.scan_camera_poses.append(camera_tf)
+                self.get_logger().info(
+                    f"Scan {scan_index + 1}: {xyz.shape[0]} pts entrada → "
+                    f"modelo con {n_model} pts ({self.model_scan_count} scans fusionados). "
+                    f"Pose camara: ({t.x:.3f}, {t.y:.3f}, {t.z:.3f}) en '{self.target_frame}'. "
+                    f"stamp_nube={cloud_stamp.sec}.{cloud_stamp.nanosec:09d}, "
+                    f"stamp_tf={tf_stamp.sec}.{tf_stamp.nanosec:09d}."
+                )
+            else:
+                self.get_logger().info(
+                    f"Scan {scan_index + 1}: {xyz.shape[0]} pts entrada → "
+                    f"modelo con {n_model} pts ({self.model_scan_count} scans fusionados)."
+                )
         else:
             self.get_logger().warn(
                 f"Registro del scan {scan_index + 1} fallo; descartando snapshot."
@@ -315,14 +356,47 @@ class PointCloudScannerNode(Node):
             event for event in self.pending_capture_events if now < event[1]
         ]
         for scan_index, _ in ready_events:
+            # Captura la foto, la fusiona en base_link y confirma al motion.
             self._capture_latest_cloud_snapshot(scan_index)
+            self._publish_capture_done(scan_index)
 
-        expected_done = (
-            self.expected_captures > 0
-            and self.model_scan_count >= self.expected_captures
-        )
+        # La finalizacion normal la dispara el motion con el evento 'at_home'.
+        # El timeout es solo una red de seguridad si ese evento nunca llega.
         timed_out = self.capture_until is not None and now >= self.capture_until
-        if not expected_done and not timed_out:
+        if timed_out:
+            self.get_logger().warn(
+                "Timeout de seguridad alcanzado sin evento 'at_home'; "
+                "finalizo la captura de todas formas."
+            )
+            self._finalize_and_publish()
+
+    def _publish_capture_done(self, scan_index):
+        msg = Int32()
+        msg.data = int(scan_index)
+        self.capture_done_pub.publish(msg)
+        self.get_logger().info(
+            f"Foto del punto {scan_index + 1} guardada en '{self.target_frame}'; "
+            f"confirmo al motion para que continue."
+        )
+
+    def _on_scan_event(self, msg):
+        event = str(msg.data).strip().lower()
+        if event == "scan_finished":
+            self.arc_finished = True
+            self.get_logger().info(
+                "Motion termino el arco; no capturo mas nubes. Esperando 'at_home'."
+            )
+        elif event == "at_home":
+            self.get_logger().info(
+                "Motion llego a home; proceso la nube completa con respecto a "
+                f"'{self.target_frame}'."
+            )
+            self._finalize_and_publish()
+        else:
+            self.get_logger().warn(f"Evento de ciclo desconocido: '{msg.data}'.")
+
+    def _finalize_and_publish(self):
+        if not self.capture_active:
             return
 
         pending_count = len(self.pending_capture_events)
@@ -330,6 +404,7 @@ class PointCloudScannerNode(Node):
         self.capture_until = None
         self.expected_captures = 0
         self.pending_capture_events = []
+        self.arc_finished = False
         cloud = self._build_complete_cloud()
         if cloud is None:
             self.get_logger().warn(
@@ -345,7 +420,8 @@ class PointCloudScannerNode(Node):
         self.complete_cloud_pub.publish(cloud)
         self.get_logger().info(
             f"Nube completa publicada en '{self.complete_cloud_topic}' con "
-            f"{cloud.width} puntos en frame '{cloud.header.frame_id}'."
+            f"{cloud.width} puntos en frame '{cloud.header.frame_id}' "
+            f"({self.model_scan_count} vistas fusionadas)."
         )
         self._schedule_inference_after_scan()
 
@@ -404,16 +480,18 @@ class PointCloudScannerNode(Node):
         self.model_o3d = None
         self.model_scan_count = 0
         self.model_has_rgb = False
+        self.scan_camera_poses = []
         self.pending_capture_events = []
         self.dwell_events_received = 0
         self.snapshot_attempts = 0
+        self.arc_finished = False
 
     # ------------------------------------------------------------------ #
     # Registration pipeline                                                #
     # ------------------------------------------------------------------ #
 
     def _register_and_fuse(self, xyz, rgb):
-        """Register a new scan into the accumulated model using FPFH+RANSAC+ICP."""
+        """Registra y fusiona un nuevo scan en el modelo acumulado."""
         source_full = self._to_o3d(xyz, rgb)
         voxel_final = float(self.get_parameter("voxel_size").value)
 
@@ -448,26 +526,26 @@ class PointCloudScannerNode(Node):
         return True
 
     def _full_registration(self, source_full, voxel_reg):
-        """FPFH + RANSAC global registration followed by point-to-plane ICP."""
+        """ICP Point-to-Plane con identidad como init.
+
+        Las nubes ya están en target_frame vía TF, por lo que la transformación
+        residual entre escaneos consecutivos es pequeña. Usar identidad como
+        inicialización evita que RANSAC converja a mínimos incorrectos.
+        """
         src_down = self._preprocess_for_registration(source_full, voxel_reg)
         tgt_down = self._preprocess_for_registration(self.model_o3d, voxel_reg)
 
-        src_fpfh = self._compute_fpfh(src_down, voxel_reg)
-        tgt_fpfh = self._compute_fpfh(tgt_down, voxel_reg)
-
-        ransac_result = self._ransac_global_registration(
-            src_down, tgt_down, src_fpfh, tgt_fpfh, voxel_reg
-        )
-
         icp_dist = float(self.get_parameter("icp_distance_threshold").value)
-        icp_result = self._icp_refine(
-            src_down, tgt_down, ransac_result.transformation, icp_dist
-        )
+        icp_result = self._icp_refine(src_down, tgt_down, np.eye(4), icp_dist)
 
         fitness = icp_result.fitness
         threshold = float(self.get_parameter("icp_fitness_threshold").value)
+        translation = icp_result.transformation[:3, 3]
+        translation_norm = float(np.linalg.norm(translation))
         self.get_logger().info(
-            f"ICP: fitness={fitness:.3f}, RMSE={icp_result.inlier_rmse:.5f}"
+            f"ICP: fitness={fitness:.3f}, RMSE={icp_result.inlier_rmse:.5f}, "
+            f"delta_t=({translation[0]:.4f}, {translation[1]:.4f}, "
+            f"{translation[2]:.4f}) m, |delta_t|={translation_norm:.4f} m"
         )
         if fitness < threshold:
             raise ValueError(
@@ -486,34 +564,6 @@ class PointCloudScannerNode(Node):
         )
         down.orient_normals_consistent_tangent_plane(k=10)
         return down
-
-    @staticmethod
-    def _compute_fpfh(cloud, voxel_size):
-        return o3d.pipelines.registration.compute_fpfh_feature(
-            cloud,
-            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 5, max_nn=100),
-        )
-
-    def _ransac_global_registration(self, source, target, src_fpfh, tgt_fpfh, voxel_size):
-        dist_thresh = voxel_size * 1.5
-        max_iter = int(self.get_parameter("ransac_max_iter").value)
-        return o3d.pipelines.registration.registration_ransac_based_on_feature_matching(
-            source,
-            target,
-            src_fpfh,
-            tgt_fpfh,
-            mutual_filter=True,
-            max_correspondence_distance=dist_thresh,
-            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint(
-                False
-            ),
-            ransac_n=3,
-            checkers=[
-                o3d.pipelines.registration.CorrespondenceCheckerBasedOnEdgeLength(0.9),
-                o3d.pipelines.registration.CorrespondenceCheckerBasedOnDistance(dist_thresh),
-            ],
-            criteria=o3d.pipelines.registration.RANSACConvergenceCriteria(max_iter, 0.999),
-        )
 
     def _icp_refine(self, source, target, init_transform, max_dist):
         max_iter = int(self.get_parameter("icp_max_iter").value)
@@ -591,7 +641,7 @@ class PointCloudScannerNode(Node):
             )
             return None
 
-    def _cloud_to_target_arrays(self, msg):
+    def _cloud_to_target_arrays(self, msg, return_transform=False):
         field_names = [field.name for field in msg.fields]
         if not {"x", "y", "z"}.issubset(field_names):
             self.get_logger().warn("La nube recibida no tiene campos x/y/z.")
@@ -616,12 +666,17 @@ class PointCloudScannerNode(Node):
                 dtype=np.uint8,
             )
 
+        transform = None
         if msg.header.frame_id and msg.header.frame_id != self.target_frame:
-            transform = self._lookup_cloud_transform(msg.header.frame_id, msg.header.stamp)
+            transform = self._lookup_cloud_transform(
+                msg.header.frame_id, msg.header.stamp
+            )
             if transform is None:
                 return None
             xyz = self._transform_xyz(xyz, transform)
 
+        if return_transform:
+            return xyz, rgb, transform
         return xyz, rgb
 
     def _lookup_cloud_transform(self, source_frame, stamp):
@@ -632,7 +687,13 @@ class PointCloudScannerNode(Node):
                 Time.from_msg(stamp),
                 timeout=Duration(seconds=0.2),
             )
-        except TransformException:
+        except TransformException as timestamp_exc:
+            if not bool(self.get_parameter("allow_latest_tf_fallback").value):
+                self.get_logger().warn(
+                    f"No pude transformar nube de '{source_frame}' a "
+                    f"'{self.target_frame}' usando su timestamp: {timestamp_exc}"
+                )
+                return None
             try:
                 return self.tf_buffer.lookup_transform(
                     self.target_frame,
@@ -643,7 +704,8 @@ class PointCloudScannerNode(Node):
             except TransformException as exc:
                 self.get_logger().warn(
                     f"No pude transformar nube de '{source_frame}' a "
-                    f"'{self.target_frame}': {exc}"
+                    f"'{self.target_frame}' ni con su timestamp ({timestamp_exc}) "
+                    f"ni con el TF mas reciente: {exc}"
                 )
                 return None
 

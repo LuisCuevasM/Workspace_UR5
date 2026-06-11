@@ -13,13 +13,17 @@ find_package(ament_cmake REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rviz_common REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(ur5_manipulation REQUIRED)
 find_package(Qt5 REQUIRED COMPONENTS Widgets)
 
 set(CMAKE_AUTOMOC ON)
 
 set(headers_to_moc
   include/ur5_rviz_plugins/grasp_control_panel.hpp
+  include/ur5_rviz_plugins/object_detected_panel.hpp
+  include/ur5_rviz_plugins/skill_control_panel.hpp
 )
 
 qt5_wrap_cpp(moc_files ${headers_to_moc})
@@ -27,6 +31,8 @@ qt5_wrap_cpp(moc_files ${headers_to_moc})
 add_library(${PROJECT_NAME} SHARED
   ${moc_files}
   src/grasp_control_panel.cpp
+  src/object_detected_panel.cpp
+  src/skill_control_panel.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -44,7 +50,9 @@ ament_target_dependencies(${PROJECT_NAME}
   pluginlib
   rclcpp
   rviz_common
+  std_msgs
   std_srvs
+  ur5_manipulation
 )
 
 pluginlib_export_plugin_description_file(rviz_common plugins_description.xml)
@@ -69,7 +77,7 @@ install(
 
 ament_export_include_directories(include)
 ament_export_targets(${PROJECT_NAME} HAS_LIBRARY_TARGET)
-ament_export_dependencies(pluginlib rclcpp rviz_common std_srvs)
+ament_export_dependencies(pluginlib rclcpp rviz_common std_msgs std_srvs ur5_manipulation)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

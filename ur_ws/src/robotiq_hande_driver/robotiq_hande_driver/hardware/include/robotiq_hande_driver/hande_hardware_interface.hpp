@@ -8,6 +8,7 @@
 
 #include <hardware_interface/system_interface.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64.hpp>
 
 #include "robotiq_hande_driver/hande_gripper.hpp"
@@ -55,6 +56,7 @@ class RobotiqHandeHardwareInterface : public HWI::SystemInterface {
     rclcpp::Clock::SharedPtr clock_;
     rclcpp::Node::SharedPtr telemetry_node_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr current_publisher_;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr object_detected_publisher_;
 
     std::chrono::milliseconds th_sleep_rate_;
     std::atomic<bool> th_comm_enabled_;

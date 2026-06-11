@@ -1,0 +1,12 @@
+# /robot/get_camera_image
+# Captura el frame RGB actual de la RealSense para enviarlo al servidor VLM.
+# Request vacio.
+---
+bool success
+string image_base64     # JPEG (o PNG) codificado en base64
+string encoding         # "jpeg" o "png"
+int32 width
+int32 height
+string frame_id         # ej. "camera_color_optical_frame"
+float64 stamp           # timestamp UNIX en segundos del frame RGB usado
+string detail           # info de debugging (vacio si todo ok)

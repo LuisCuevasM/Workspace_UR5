@@ -5,10 +5,11 @@ Panels:
     Property Tree Widget:
       Expanded:
         - /MotionPlanning1/Scene Geometry1
-        - /PointCloud21
         - /TF1/Frames1
+        - /Marker1/Topic1
+        - /PointCloud23
       Splitter Ratio: 0.5
-    Tree Height: 305
+    Tree Height: 137
   - Class: rviz_common/Help
     Name: Help
   - Class: rviz_common/Views
@@ -18,6 +19,10 @@ Panels:
     Splitter Ratio: 0.5
   - Class: ur5_rviz_plugins/GraspControlPanel
     Name: GraspControlPanel
+  - Class: ur5_rviz_plugins/ObjectDetectedPanel
+    Name: ObjectDetectedPanel
+  - Class: ur5_rviz_plugins/SkillControlPanel
+    Name: SkillControlPanel
 Visualization Manager:
   Class: ""
   Displays:
@@ -419,7 +424,7 @@ Visualization Manager:
         Filter size: 10
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /octomap/home_scene_cloud
+        Value: /sam2/object_cloud
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
@@ -610,6 +615,53 @@ Visualization Manager:
       Use Fixed Frame: true
       Use rainbow: true
       Value: true
+    - Class: rviz_default_plugins/Marker
+      Enabled: true
+      Name: Marker
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /point_cloud_scanner/scan_marker
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: ""
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: PointCloud2
+      Position Transformer: ""
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.009999999776482582
+      Style: Points
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /point_cloud_scanner/object_cloud_complete
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -628,25 +680,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.7146186828613281
+      Distance: 0.9988484382629395
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -0.6028607487678528
-        Y: -0.27618786692619324
-        Z: -0.03420323133468628
+        X: -0.5357097387313843
+        Y: -0.24948137998580933
+        Z: -0.05050164833664894
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.4999988079071045
+      Pitch: 0.4399980902671814
       Target Frame: world
       Value: Orbit (rviz_default_plugins)
-      Yaw: 1.6019742488861084
+      Yaw: 6.215144634246826
     Saved: ~
 Window Geometry:
   Displays:
@@ -662,7 +714,11 @@ Window Geometry:
     collapsed: false
   MotionPlanning - Trajectory Slider:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000002b40000039dfc0200000006fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000003f00fffffffb000000100044006900730070006c006100790073010000003b000001b2000000c700fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e006701000001f30000016e0000016900fffffffb0000000800480065006c0070000000029a0000006e0000006e00fffffffb0000000a00560069006500770073000000027800000160000000a000fffffffb00000022004700720061007300700043006f006e00740072006f006c00500061006e0065006c0100000367000000710000007100ffffff000004840000039d00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  ObjectDetectedPanel:
+    collapsed: false
+  QMainWindow State: 000000ff00000000fd00000001000000000000015f0000039dfc0200000008fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000003f00fffffffb000000100044006900730070006c006100790073010000003b0000010a000000c700fffffffb00000026004f0062006a0065006300740044006500740065006300740065006400500061006e0065006c010000014b0000008d0000008d00fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e006700000001d0000001740000016900fffffffb0000000800480065006c0070000000029a0000006e0000006e00fffffffb0000000a00560069006500770073000000027800000160000000a000fffffffb00000022004700720061007300700043006f006e00740072006f006c00500061006e0065006c01000001de000000fa000000fa00fffffffb000000220053006b0069006c006c0043006f006e00740072006f006c00500061006e0065006c01000002de000000fa000000fa00ffffff000005d90000039d00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  SkillControlPanel:
+    collapsed: false
   Views:
     collapsed: false
   Width: 1854

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+import os
+# Reduce la fragmentacion de VRAM (ver hint de CUDA OOM). Debe definirse antes
+# de importar torch para que el allocator lo tome.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import rclpy
 from rclpy.node import Node
 import numpy as np
@@ -6,12 +11,14 @@ import matplotlib.pyplot as plt
 import torch
 import cv2
 import time
-import os
+import gc
 import tempfile
+import json
+from contextlib import contextmanager, nullcontext, redirect_stderr, redirect_stdout
 
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 from sensor_msgs_py import point_cloud2
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
 from std_srvs.srv import Trigger
 from cv_bridge import CvBridge
 from message_filters import Subscriber, ApproximateTimeSynchronizer
@@ -20,6 +27,12 @@ from sam2.build_sam import build_sam2_video_predictor
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torchvision")
+
+
+@contextmanager
+def _redirect_console_output(stream):
+    with redirect_stdout(stream), redirect_stderr(stream):
+        yield
 
 
 def depth_to_points(valid_mask, z, fx, fy, cx, cy):
@@ -180,16 +193,16 @@ class Sam2ServiceNode(Node):
         self.video_prompt_box = None
         self.video_prompt_points = None
         self.video_prompt_labels = None
+        self.vlm_prompt_file = "/tmp/vlm_prompt/sam2_vlm_prompt.json"
+        self.declare_parameter("show_sam2_progress", False)
+        self.declare_parameter("log_cloud_publications", False)
 
-        # Carga de modelo (se mantiene)
-        checkpoint = "/workspace/sam2/checkpoints/sam2.1_hiera_base_plus.pt"
-        model_cfg  = "configs/sam2.1/sam2.1_hiera_b+.yaml"
+        # Carga de modelo (bajo demanda, liberable con /sam2/release_model)
+        self.sam2_checkpoint = "/workspace/sam2/checkpoints/sam2.1_hiera_base_plus.pt"
+        self.sam2_model_cfg = "configs/sam2.1/sam2.1_hiera_b+.yaml"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.predictor = build_sam2_video_predictor(
-            model_cfg,
-            checkpoint,
-            device=self.device,
-        )
+        self.predictor = None
+        self.load_predictor()
         self.bridge = CvBridge()
 
         # Publicadores
@@ -206,6 +219,18 @@ class Sam2ServiceNode(Node):
         self.resume_service = self.create_service(
             Trigger, "/sam2/resume_inference", self.handle_resume
         )
+        self.apply_vlm_prompt_service = self.create_service(
+            Trigger, "/sam2/apply_vlm_prompt", self.handle_apply_vlm_prompt
+        )
+        self.release_model_service = self.create_service(
+            Trigger, "/sam2/release_model", self.handle_release_model
+        )
+        self.load_model_service = self.create_service(
+            Trigger, "/sam2/load_model", self.handle_load_model
+        )
+        self.vlm_prompt_sub = self.create_subscription(
+            String, "/sam2/vlm_prompt", self.handle_vlm_prompt, 10
+        )
 
         # Suscriptores Sincronizados
         self.sub_rgb = Subscriber(self, Image, self.rgb_topic)
@@ -214,13 +239,26 @@ class Sam2ServiceNode(Node):
         self.sync = ApproximateTimeSynchronizer([self.sub_rgb, self.sub_depth, self.sub_info], 5, 0.05)
         self.sync.registerCallback(self.sync_callback)
 
-        self.get_logger().info("SAM2 Service Node listo. Esperando 'Home' (/sam2/select_object)")
+        self.get_logger().info(
+            "SAM2 Service Node listo. Esperando 'Home' (/sam2/select_object) "
+            "o prompt VLM en /sam2/apply_vlm_prompt"
+        )
 
     def sync_callback(self, rgb_msg, depth_msg, info_msg):
         """ Solo guarda los datos. No procesa nada a menos que processing_active sea True """
         self.latest_rgb_msg = rgb_msg
         self.latest_depth_msg = depth_msg
         self.latest_info_msg = info_msg
+
+        rgb_stamp = self.stamp_to_seconds(rgb_msg.header.stamp)
+        depth_stamp = self.stamp_to_seconds(depth_msg.header.stamp)
+        info_stamp = self.stamp_to_seconds(info_msg.header.stamp)
+        self.get_logger().debug(
+            "Datos sincronizados SAM2: "
+            f"rgb={rgb_stamp:.9f}, depth={depth_stamp:.9f}, info={info_stamp:.9f}, "
+            f"delta_rgb_depth={(rgb_stamp - depth_stamp) * 1000.0:.2f} ms, "
+            f"depth_frame='{depth_msg.header.frame_id}', info_frame='{info_msg.header.frame_id}'."
+        )
         
         bgr = self.bridge.imgmsg_to_cv2(rgb_msg, "bgr8")
         self.latest_rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -267,7 +305,11 @@ class Sam2ServiceNode(Node):
 
             self.prompt_box = np.array(box, dtype=np.float32)
             self.last_good_prompt_box = self.prompt_box.copy()
-            self.reset_video_tracking(self.latest_rgb, self.latest_rgb_msg.header.stamp)
+            self.reset_video_tracking(
+                self.latest_rgb,
+                self.latest_rgb_msg.header.stamp,
+                prompt_box=self.prompt_box,
+            )
             self.processing_active = True # Activamos el procesamiento en el callback
             if not self.run_inference_cycle():
                 self.processing_active = False
@@ -283,6 +325,162 @@ class Sam2ServiceNode(Node):
             return response
         finally:
             self.selection_in_progress = False
+
+    def handle_vlm_prompt(self, msg):
+        try:
+            data = json.loads(msg.data)
+        except json.JSONDecodeError as exc:
+            self.get_logger().warn(f"Prompt VLM invalido: {exc}")
+            return
+
+        self.apply_vlm_prompt_data(data)
+
+    def load_predictor(self):
+        """Carga el video predictor de SAM2 en GPU si no esta cargado."""
+        if self.predictor is not None:
+            return
+        self.predictor = build_sam2_video_predictor(
+            self.sam2_model_cfg,
+            self.sam2_checkpoint,
+            device=self.device,
+        )
+        self.get_logger().info("SAM2 predictor cargado en GPU.")
+
+    def handle_release_model(self, request, response):
+        """Libera el modelo SAM2 de la GPU para dejar VRAM al VLM."""
+        del request
+        self.processing_active = False
+        self.predictor = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+        self.get_logger().info("Modelo SAM2 liberado de la GPU (/sam2/release_model).")
+        response.success = True
+        response.message = "SAM2 model released"
+        return response
+
+    def handle_load_model(self, request, response):
+        """Recarga el modelo SAM2 en la GPU si fue liberado."""
+        del request
+        try:
+            self.load_predictor()
+        except Exception as exc:
+            response.success = False
+            response.message = f"No se pudo cargar SAM2: {exc}"
+            self.get_logger().error(response.message)
+            return response
+        response.success = True
+        response.message = "SAM2 model loaded"
+        return response
+
+    def handle_apply_vlm_prompt(self, request, response):
+        del request
+
+        try:
+            with open(self.vlm_prompt_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except OSError as exc:
+            response.success = False
+            response.message = f"No pude leer prompt VLM {self.vlm_prompt_file}: {exc}"
+            return response
+        except json.JSONDecodeError as exc:
+            response.success = False
+            response.message = f"JSON VLM invalido en {self.vlm_prompt_file}: {exc}"
+            return response
+
+        success, message = self.apply_vlm_prompt_data(data)
+        response.success = success
+        response.message = message
+        return response
+
+    def apply_vlm_prompt_data(self, data):
+        if self.predictor is None:
+            # El modelo pudo haberse liberado para el ciclo VLM; recargarlo.
+            try:
+                self.load_predictor()
+            except Exception as exc:
+                message = f"SAM2 no esta cargado y no se pudo recargar: {exc}"
+                self.get_logger().error(message)
+                return False, message
+
+        try:
+            box = np.array(data["box_xyxy"], dtype=np.float32)
+            point_coords = np.array(data.get("point_coords", []), dtype=np.float32)
+            point_labels = np.array(data.get("point_labels", []), dtype=np.int32)
+        except (KeyError, TypeError, ValueError) as exc:
+            message = f"Prompt VLM invalido: {exc}"
+            self.get_logger().warn(message)
+            return False, message
+
+        if box.shape != (4,):
+            message = f"Prompt VLM invalido: box_xyxy debe tener 4 valores, recibido {box}."
+            self.get_logger().warn(message)
+            return False, message
+
+        if point_coords.size == 0:
+            point_coords = np.empty((0, 2), dtype=np.float32)
+
+        if point_coords.ndim != 2 or point_coords.shape[1] != 2:
+            message = "Prompt VLM invalido: point_coords debe ser Nx2."
+            self.get_logger().warn(message)
+            return False, message
+
+        if point_labels.ndim != 1 or point_labels.shape[0] != point_coords.shape[0]:
+            message = "Prompt VLM invalido: point_labels debe calzar con point_coords."
+            self.get_logger().warn(message)
+            return False, message
+
+        if self.latest_rgb is None:
+            message = "Prompt VLM recibido, pero aun no hay imagen RGB disponible."
+            self.get_logger().warn(message)
+            return False, message
+
+        if not hasattr(self, "latest_depth_msg") or not hasattr(self, "latest_info_msg"):
+            message = "Prompt VLM recibido, pero aun no hay depth/camera_info sincronizados."
+            self.get_logger().warn(message)
+            return False, message
+
+        height, width = self.latest_rgb.shape[:2]
+        box[0] = np.clip(box[0], 0, width - 1)
+        box[2] = np.clip(box[2], 0, width - 1)
+        box[1] = np.clip(box[1], 0, height - 1)
+        box[3] = np.clip(box[3], 0, height - 1)
+        if point_coords.shape[0] > 0:
+            point_coords[:, 0] = np.clip(point_coords[:, 0], 0, width - 1)
+            point_coords[:, 1] = np.clip(point_coords[:, 1], 0, height - 1)
+
+        if box[2] <= box[0] or box[3] <= box[1]:
+            message = f"Prompt VLM invalido: caja degenerada {box.tolist()}."
+            self.get_logger().warn(message)
+            return False, message
+
+        self.processing_active = False
+        self.prompt_box = box
+        self.last_good_prompt_box = self.prompt_box.copy()
+        self.reset_video_tracking(
+            self.latest_rgb,
+            self.latest_rgb_msg.header.stamp,
+            prompt_box=box,
+            prompt_points=point_coords,
+            prompt_labels=point_labels,
+        )
+
+        target = data.get("target_object", "objeto")
+        part = data.get("selected_safe_part", "parte seleccionada")
+        self.get_logger().info(
+            f"Aplicando prompt VLM: objeto='{target}', parte='{part}', "
+            f"box={box.tolist()}, puntos={point_coords.tolist()}, labels={point_labels.tolist()}"
+        )
+
+        self.processing_active = True
+        if not self.run_inference_cycle():
+            self.processing_active = False
+            message = "No se pudo generar nube tras aplicar prompt VLM."
+            self.get_logger().warn(message)
+            return False, message
+
+        return True, "Prompt VLM aplicado e inferencia SAM2 publicada."
 
     def handle_stop(self, request, response):
         """ Este servicio se llama para detener SAM y esperar al siguiente ciclo """
@@ -315,14 +513,24 @@ class Sam2ServiceNode(Node):
     def stamp_key(self, stamp):
         return (stamp.sec, stamp.nanosec)
 
-    def reset_video_tracking(self, rgb, stamp):
-        self.video_prompt_box = self.prompt_box.copy()
-        x1, y1, x2, y2 = self.video_prompt_box
-        self.video_prompt_points = np.array(
-            [[0.5 * (x1 + x2), 0.5 * (y1 + y2)]],
-            dtype=np.float32,
+    @staticmethod
+    def stamp_to_seconds(stamp):
+        return float(stamp.sec) + float(stamp.nanosec) * 1e-9
+
+    def reset_video_tracking(self, rgb, stamp, prompt_box=None, prompt_points=None, prompt_labels=None):
+        self.video_prompt_box = (
+            prompt_box.copy() if prompt_box is not None else self.prompt_box.copy()
         )
-        self.video_prompt_labels = np.array([1], dtype=np.int32)
+        if (
+            prompt_points is not None
+            and prompt_labels is not None
+            and prompt_points.shape[0] > 0
+        ):
+            self.video_prompt_points = prompt_points.astype(np.float32).copy()
+            self.video_prompt_labels = prompt_labels.astype(np.int32).copy()
+        else:
+            self.video_prompt_points = None
+            self.video_prompt_labels = None
         self.video_rgb_frames = [rgb.copy()]
         self.video_frame_stamps = [self.stamp_key(stamp)]
 
@@ -357,39 +565,39 @@ class Sam2ServiceNode(Node):
     def mask_from_video_predictor(self):
         if self.video_prompt_box is None:
             self.video_prompt_box = self.prompt_box.copy()
-        if self.video_prompt_points is None:
-            x1, y1, x2, y2 = self.video_prompt_box
-            self.video_prompt_points = np.array(
-                [[0.5 * (x1 + x2), 0.5 * (y1 + y2)]],
-                dtype=np.float32,
-            )
-            self.video_prompt_labels = np.array([1], dtype=np.int32)
 
         self.append_video_frame_if_new()
         self.write_video_frames()
 
-        with torch.inference_mode():
-            inference_state = self.predictor.init_state(video_path=self.video_frame_dir)
-            self.predictor.reset_state(inference_state)
-            _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
-                inference_state=inference_state,
-                frame_idx=0,
-                obj_id=self.video_obj_id,
-                points=self.video_prompt_points,
-                labels=self.video_prompt_labels,
-                box=self.video_prompt_box,
+        show_progress = bool(self.get_parameter("show_sam2_progress").value)
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            output_context = (
+                nullcontext()
+                if show_progress
+                else _redirect_console_output(devnull)
             )
+            with output_context, torch.inference_mode():
+                inference_state = self.predictor.init_state(video_path=self.video_frame_dir)
+                self.predictor.reset_state(inference_state)
+                _, out_obj_ids, out_mask_logits = self.predictor.add_new_points_or_box(
+                    inference_state=inference_state,
+                    frame_idx=0,
+                    obj_id=self.video_obj_id,
+                    points=self.video_prompt_points,
+                    labels=self.video_prompt_labels,
+                    box=self.video_prompt_box,
+                )
 
-            target_frame_idx = len(self.video_rgb_frames) - 1
-            if target_frame_idx > 0:
-                out_mask_logits = None
-                for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(
-                    inference_state,
-                    start_frame_idx=0,
-                    max_frame_num_to_track=target_frame_idx + 1,
-                ):
-                    if out_frame_idx == target_frame_idx:
-                        break
+                target_frame_idx = len(self.video_rgb_frames) - 1
+                if target_frame_idx > 0:
+                    out_mask_logits = None
+                    for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor.propagate_in_video(
+                        inference_state,
+                        start_frame_idx=0,
+                        max_frame_num_to_track=target_frame_idx + 1,
+                    ):
+                        if out_frame_idx == target_frame_idx:
+                            break
 
         if out_mask_logits is None:
             return None
@@ -403,6 +611,11 @@ class Sam2ServiceNode(Node):
 
     def run_inference_cycle(self):
         """ Ejecuta la lógica de SAM2 y publica la nube de puntos """
+        if self.predictor is None:
+            self.get_logger().warn(
+                "SAM2 esta liberado de la GPU; llama /sam2/load_model antes de inferir."
+            )
+            return False
         if self.latest_rgb is None or not hasattr(self, "latest_depth_msg") or not hasattr(
             self, "latest_info_msg"
         ):
@@ -442,8 +655,8 @@ class Sam2ServiceNode(Node):
         
         pts = depth_to_points(object_valid, z, fx, fy, cx, cy)
         scene_pts = depth_to_points(scene_valid, z, fx, fy, cx, cy)
-        pts = downsample_points(pts, 12000)
-        scene_pts = downsample_points(scene_pts, 50000)
+        pts = downsample_points(pts, 4096)
+        scene_pts = downsample_points(scene_pts, 10000)
 
         if pts.shape[0] < 50:
             self.get_logger().warn(f"Too few masked depth pixels: {pts.shape[0]}")
@@ -468,9 +681,25 @@ class Sam2ServiceNode(Node):
                 )
 
         # Publicar
-        header = Header(stamp=self.latest_rgb_msg.header.stamp, frame_id=info.header.frame_id)
+        depth_stamp = self.latest_depth_msg.header.stamp
+        rgb_stamp = self.latest_rgb_msg.header.stamp
+        delta_ms = (
+            self.stamp_to_seconds(rgb_stamp) - self.stamp_to_seconds(depth_stamp)
+        ) * 1000.0
+        header = Header(stamp=depth_stamp, frame_id=info.header.frame_id)
         self.cloud_pub.publish(point_cloud2.create_cloud_xyz32(header, pts))
         self.scene_cloud_pub.publish(point_cloud2.create_cloud_xyz32(header, scene_pts))
+        log_cloud = (
+            self.get_logger().info
+            if bool(self.get_parameter("log_cloud_publications").value)
+            else self.get_logger().debug
+        )
+        log_cloud(
+            f"Nube SAM2 publicada: {pts.shape[0]} puntos, "
+            f"frame='{header.frame_id}', "
+            f"stamp_depth={depth_stamp.sec}.{depth_stamp.nanosec:09d}, "
+            f"delta_rgb_depth={delta_ms:.2f} ms."
+        )
         return True
         
         # Opcional: Auto-pausar tras generar la nube si no necesitas tracking continuo

@@ -1,0 +1,36 @@
+{
+  "target_object": "glasses",
+  "selected_safe_part": "temples",
+  "forbidden_parts": [
+    "lenses"
+  ],
+  "object_box_xyxy_norm": [
+    0.06,
+    0.07,
+    0.62,
+    0.8
+  ],
+  "positive_points_xy_norm": [
+    [
+      0.15,
+      0.5
+    ],
+    [
+      0.4,
+      0.2
+    ]
+  ],
+  "negative_points_xy_norm": [
+    [
+      0.35,
+      0.65
+    ],
+    [
+      0.55,
+      0.45
+    ]
+  ],
+  "force_level": "very_low",
+  "confidence": "high",
+  "reason": "The safest way to grasp glasses is by the temples (arms) to avoid applying pressure to the fragile lenses or the frame center."
+}

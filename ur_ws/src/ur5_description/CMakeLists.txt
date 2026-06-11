@@ -20,7 +20,10 @@ find_package(xacro REQUIRED)
 # Estos no necesitan compilación, solo se copian a la carpeta de instalación
 install(PROGRAMS
   src/ur5_behavior_tree_node.py
+  src/ur5_gripper_control_node.py
   src/ur5_move_group_client.py
+  src/ur5_skill_server.py
+  src/robot_skills.py
   src/ur5_place.py
   src/ur5_return_home_on_success.py
   src/gripper_jointstate.py

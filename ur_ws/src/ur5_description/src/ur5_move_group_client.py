@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
+import json
 import math
 import threading
 import time
 
 import rclpy
 from builtin_interfaces.msg import Duration
-from control_msgs.action import GripperCommand
 from geometry_msgs.msg import Pose, PoseArray, PoseStamped
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import (
@@ -26,11 +26,29 @@ from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
+from std_msgs.msg import Bool, Float32MultiArray, String
 from std_srvs.srv import Empty, Trigger
 from tf2_geometry_msgs import do_transform_pose
 from tf2_ros import Buffer, TransformListener
+
+
+# Mapeo de los prefijos de mensaje INTERNOS (constantes de este nodo) al codigo
+# estructurado de fallo del contrato del orquestador. Son prefijos fijos, no
+# texto libre, asi que el mapeo es robusto. (failure_type, stage)
+_FINISH_FAILURE_PREFIXES = [
+    ("GRASPGEN_SERVICE_UNAVAILABLE", "no_grasps_generated", "grasp_generation"),
+    ("INVALID_GRASP_FRAME", "no_grasps_generated", "grasp_generation"),
+    ("FAILURE_NO_REACHABLE_GRASP", "ik_failed", "ik"),
+    ("NO_REACHABLE_GRASP", "ik_failed", "ik"),
+    ("FAILURE_GRASP_NOT_DETECTED", "object_slipped", "execution"),
+    ("GRASP_FALLIDO", "object_slipped", "execution"),
+]
+
+# Fases de movimiento que pertenecen a la etapa "place".
+_PLACE_PHASES = ("place", "place_descend", "place_ascend")
 
 
 class MinimalGraspExecutor(Node):
@@ -43,6 +61,9 @@ class MinimalGraspExecutor(Node):
         ).value
         self.planner_id = self.declare_parameter("planner_id", "").value
         self.target_frame = self.declare_parameter("target_frame", "base_link").value
+        self.target_frame = self.declare_parameter(
+            "planning_frame", self.target_frame
+        ).value
         self.execute = self.declare_parameter("execute", True).value
         self.auto_start = self.declare_parameter("auto_start", True).value
         self.use_approach_stage = self.declare_parameter(
@@ -50,6 +71,9 @@ class MinimalGraspExecutor(Node):
         ).value
         self.approach_offset = float(
             self.declare_parameter("approach_offset", 0.08).value
+        )
+        self.approach_offset = float(
+            self.declare_parameter("approach_distance", self.approach_offset).value
         )
         self.approach_axis = self.declare_parameter("approach_axis", "z").value
         self.approach_sign = float(
@@ -110,6 +134,15 @@ class MinimalGraspExecutor(Node):
         self.execute_cached_cycle_service_name = self.declare_parameter(
             "execute_cached_cycle_service_name", "/ur5/execute_cached_grasp_cycle"
         ).value
+        self.execute_pick_service_name = self.declare_parameter(
+            "execute_pick_service_name", "/ur5/execute_pick"
+        ).value
+        self.execute_place_service_name = self.declare_parameter(
+            "execute_place_service_name", "/ur5/execute_place"
+        ).value
+        self.clear_grasp_cache_service_name = self.declare_parameter(
+            "clear_grasp_cache_service_name", "/ur5/clear_grasp_cache"
+        ).value
         self.go_home_service_name = self.declare_parameter(
             "go_home_service_name", "/ur5/go_home"
         ).value
@@ -125,8 +158,29 @@ class MinimalGraspExecutor(Node):
         self.top_grasps_topic = self.declare_parameter(
             "top_grasps_topic", "/graspgen/top_grasps"
         ).value
-        self.max_ik_retries = int(
-            self.declare_parameter("max_ik_retries", 5).value
+        self.top_scores_topic = self.declare_parameter(
+            "top_scores_topic", "/graspgen/top_scores"
+        ).value
+        self.max_grasps_to_try = int(
+            self.declare_parameter("max_grasps_to_try", 10).value
+        )
+        self.max_graspgen_retries = int(
+            self.declare_parameter("max_graspgen_retries", 3).value
+        )
+        self.use_cached_grasps_first = bool(
+            self.declare_parameter("use_cached_grasps_first", True).value
+        )
+        self.clear_cache_on_ik_failure = bool(
+            self.declare_parameter("clear_cache_on_ik_failure", True).value
+        )
+        self.cached_grasp_max_age_sec = float(
+            self.declare_parameter("cached_grasp_max_age_sec", 120.0).value
+        )
+        self.planning_timeout = float(
+            self.declare_parameter("planning_timeout", 25.0).value
+        )
+        ik_timeout_sec = float(
+            self.declare_parameter("ik_timeout", 0.25).value
         )
         self.enable_octomap_freeze = bool(
             self.declare_parameter("enable_octomap_freeze", False).value
@@ -143,24 +197,27 @@ class MinimalGraspExecutor(Node):
         self.frozen_octomap_update_rate = float(
             self.declare_parameter("frozen_octomap_update_rate", 1.0e-6).value
         )
-        self.gripper_action_name = self.declare_parameter(
-            "gripper_action_name",
-            "gripper/gripper_action_controller/gripper_cmd",
+        self.close_gripper_service_name = self.declare_parameter(
+            "close_gripper_service_name", "/ur5/gripper/close"
         ).value
-        self.close_gripper_position = float(
-            self.declare_parameter("close_gripper_position", 0.0).value
-        )
-        self.close_gripper_max_effort = float(
-            self.declare_parameter("close_gripper_max_effort", 0.0).value
-        )
-        self.open_gripper_position = float(
-            self.declare_parameter("open_gripper_position", 0.025).value
-        )
-        self.open_gripper_max_effort = float(
-            self.declare_parameter("open_gripper_max_effort", 0.0).value
-        )
+        self.open_gripper_service_name = self.declare_parameter(
+            "open_gripper_service_name", "/ur5/gripper/open"
+        ).value
         self.post_grasp_lift_z = float(
             self.declare_parameter("post_grasp_lift_z", 0.10).value
+        )
+        self.object_detected_topic = self.declare_parameter(
+            "object_detected_topic",
+            "/gripper/robotiq_hande_telemetry/object_detected",
+        ).value
+        self.verify_object_detected = bool(
+            self.declare_parameter("verify_object_detected", True).value
+        )
+        self.object_detected_settle_sec = float(
+            self.declare_parameter("object_detected_settle_sec", 0.5).value
+        )
+        self.object_detected_max_age_sec = float(
+            self.declare_parameter("object_detected_max_age_sec", 2.0).value
         )
         self.arm_joint_names = list(
             self.declare_parameter(
@@ -178,8 +235,13 @@ class MinimalGraspExecutor(Node):
         self.place_joint_positions = list(
             self.declare_parameter(
                 "place_joint_positions",
-                [1.5010, -2.4609, -0.6981, -1.5708, 1.5708, 0.8552],
+                [1.6232, -2.2689, -0.5760, -1.8675, 1.5708, 0.8901],
             ).value
+        )
+        # Descenso/ascenso vertical (m) al depositar dentro del box: tras llegar al q de
+        # place baja esta distancia, abre el gripper y vuelve a subirla antes de ir a home.
+        self.place_descend_z = float(
+            self.declare_parameter("place_descend_z", 0.13).value
         )
         self.home_joint_positions = list(
             self.declare_parameter(
@@ -188,14 +250,19 @@ class MinimalGraspExecutor(Node):
             ).value
         )
 
-        self.min_target_z = 0.01
+        self.min_target_z = 0.005
         self.goal_joint_tolerance = 1e-3
-        self.ik_timeout = Duration(sec=0, nanosec=250_000_000)
+        ik_timeout_sec = max(0.001, ik_timeout_sec)
+        self.ik_timeout = Duration(
+            sec=int(ik_timeout_sec),
+            nanosec=int((ik_timeout_sec % 1.0) * 1_000_000_000),
+        )
         self.latest_arm_joint_state = None
         self.latest_best_grasp_msg = None
         self.latest_best_grasp_arrival_ns = 0
         self.latest_top_grasps_msg = None
         self.latest_top_grasps_arrival_ns = 0
+        self.latest_top_scores = []
         self.awaiting_grasp_result = False
         self.request_in_flight = False
         self.cycle_active = False
@@ -204,9 +271,12 @@ class MinimalGraspExecutor(Node):
         self.current_request_reason = ""
         self.current_retry_count = 0
         self.start_cycle_requested = False
+        # Modo del ciclo activo: "full" (grasp->place->home), "pick" (solo toma y
+        # levanta, queda sosteniendo) o "place" (deposito->open->home).
+        self.cycle_mode = "full"
         self.current_motion_phase = "idle"
         self.current_gripper_phase = "idle"
-        self.gripper_goal_active = False
+        self.gripper_request_active = False
         self.pending_grasp_goal_state = None
         self.pending_grasp_target_pose = None
         self.pending_motion_log_label = ""
@@ -217,6 +287,9 @@ class MinimalGraspExecutor(Node):
         self.cycle_done_event = threading.Event()
         self.last_cycle_succeeded = False
         self.last_cycle_result_message = "Sin ejecucion previa"
+        self.latest_object_detected = None
+        self.latest_object_detected_ns = 0
+        self.object_detected_lock = threading.Lock()
         self.moveit_cb_group = ReentrantCallbackGroup()
         self.subscriptions_cb_group = ReentrantCallbackGroup()
         self.timer_cb_group = ReentrantCallbackGroup()
@@ -271,10 +344,14 @@ class MinimalGraspExecutor(Node):
             self.sam_resume_service_name,
             callback_group=self.moveit_cb_group,
         )
-        self.gripper_client = ActionClient(
-            self,
-            GripperCommand,
-            self.gripper_action_name,
+        self.close_gripper_client = self.create_client(
+            Trigger,
+            self.close_gripper_service_name,
+            callback_group=self.moveit_cb_group,
+        )
+        self.open_gripper_client = self.create_client(
+            Trigger,
+            self.open_gripper_service_name,
             callback_group=self.moveit_cb_group,
         )
         self.execute_trajectory_client = ActionClient(
@@ -301,6 +378,18 @@ class MinimalGraspExecutor(Node):
 
         # Planning scene publisher
         self.scene_pub = self.create_publisher(PlanningScene, "/planning_scene", 10)
+
+        # Publicador latcheado del fallo estructurado para el orquestador LangGraph.
+        # robot_skill_node (ur5_manipulation) lee el ultimo valor y lo reenvia como
+        # failure_type/stage del contrato, sin heuristica de texto.
+        skill_failure_qos = QoSProfile(
+            depth=1,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.skill_failure_pub = self.create_publisher(
+            String, "/ur5/skill_failure", skill_failure_qos
+        )
         self.run_cycle_service = self.create_service(
             Trigger,
             self.run_cycle_service_name,
@@ -311,6 +400,24 @@ class MinimalGraspExecutor(Node):
             Trigger,
             self.execute_cached_cycle_service_name,
             self._handle_execute_cached_cycle_request,
+            callback_group=self.moveit_cb_group,
+        )
+        self.execute_pick_service = self.create_service(
+            Trigger,
+            self.execute_pick_service_name,
+            self._handle_execute_pick_request,
+            callback_group=self.moveit_cb_group,
+        )
+        self.execute_place_service = self.create_service(
+            Trigger,
+            self.execute_place_service_name,
+            self._handle_execute_place_request,
+            callback_group=self.moveit_cb_group,
+        )
+        self.clear_grasp_cache_service = self.create_service(
+            Trigger,
+            self.clear_grasp_cache_service_name,
+            self._handle_clear_grasp_cache_request,
             callback_group=self.moveit_cb_group,
         )
         self.go_home_service = self.create_service(
@@ -336,10 +443,24 @@ class MinimalGraspExecutor(Node):
             callback_group=self.subscriptions_cb_group,
         )
         self.create_subscription(
+            Float32MultiArray,
+            self.top_scores_topic,
+            self._on_top_scores,
+            10,
+            callback_group=self.subscriptions_cb_group,
+        )
+        self.create_subscription(
             JointState,
             "/joint_states",
             self._on_joint_states,
             50,
+            callback_group=self.subscriptions_cb_group,
+        )
+        self.create_subscription(
+            Bool,
+            self.object_detected_topic,
+            self._on_object_detected,
+            10,
             callback_group=self.subscriptions_cb_group,
         )
 
@@ -367,9 +488,17 @@ class MinimalGraspExecutor(Node):
             f"cartesian_min_fraction={self.cartesian_min_fraction:.3f}, "
             f"grasp_final_extra_advance={self.grasp_final_extra_advance:.4f}, "
             f"top_grasps_topic='{self.top_grasps_topic}', "
+            f"top_scores_topic='{self.top_scores_topic}', "
+            f"max_grasps_to_try={self.max_grasps_to_try}, "
+            f"max_graspgen_retries={self.max_graspgen_retries}, "
+            f"use_cached_grasps_first={self.use_cached_grasps_first}, "
+            f"clear_cache_on_ik_failure={self.clear_cache_on_ik_failure}, "
+            f"planning_timeout={self.planning_timeout:.1f}, "
             f"enable_octomap_freeze={self.enable_octomap_freeze}, "
             f"pause_sam_during_pick={self.pause_sam_during_pick}, "
-            f"sam_select_service='{self.sam_select_service_name}')."
+            f"sam_select_service='{self.sam_select_service_name}', "
+            f"close_gripper_service='{self.close_gripper_service_name}', "
+            f"open_gripper_service='{self.open_gripper_service_name}')."
         )
 
     def _wait_for_future_result(self, future, timeout_sec: float):
@@ -601,6 +730,53 @@ class MinimalGraspExecutor(Node):
         arm_state.position = [joint_map[name] for name in self.arm_joint_names]
         self.latest_arm_joint_state = arm_state
 
+    def _on_object_detected(self, msg: Bool):
+        with self.object_detected_lock:
+            self.latest_object_detected = bool(msg.data)
+            self.latest_object_detected_ns = self.get_clock().now().nanoseconds
+
+    def _grasp_succeeded(self) -> bool:
+        """Consulta el sensor del gripper para saber si sostiene un objeto.
+
+        Espera un breve settle para tener una lectura fresca tras el lift. Si no
+        hay telemetria disponible o esta es muy antigua, asume exito para no
+        bloquear el ciclo (fail-open) y lo deja claro en el log.
+        """
+        if self.object_detected_settle_sec > 0.0:
+            time.sleep(self.object_detected_settle_sec)
+
+        with self.object_detected_lock:
+            detected = self.latest_object_detected
+            ts_ns = self.latest_object_detected_ns
+
+        if detected is None:
+            self.get_logger().warn(
+                f"Sin telemetria de '{self.object_detected_topic}'; no se puede verificar "
+                "el grasp. Se asume exito para no bloquear el ciclo."
+            )
+            return True
+
+        age_sec = (self.get_clock().now().nanoseconds - ts_ns) / 1e9
+        if age_sec > self.object_detected_max_age_sec:
+            self.get_logger().warn(
+                f"Telemetria de deteccion antigua ({age_sec:.1f}s > "
+                f"{self.object_detected_max_age_sec:.1f}s); se asume exito para no bloquear el ciclo."
+            )
+            return True
+
+        self.get_logger().info(
+            f"Verificacion de grasp: object_detected={detected} (edad={age_sec:.2f}s)."
+        )
+        return detected
+
+    def _begin_failed_grasp_recovery(self):
+        self._call_gripper_service(
+            self.open_gripper_client,
+            self.open_gripper_service_name,
+            "after_failed_grasp_open",
+            "abrir gripper tras grasp fallido",
+        )
+
     def _msg_stamp_to_ns(self, stamp) -> int:
         return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
@@ -635,6 +811,9 @@ class MinimalGraspExecutor(Node):
         if not self.grasp_client.wait_for_service(timeout_sec=1.0):
             self.get_logger().error(
                 f"Servicio de grasp '{self.grasp_service_name}' no disponible."
+            )
+            self._finish_cycle(
+                message=f"GRASPGEN_SERVICE_UNAVAILABLE: {self.grasp_service_name}"
             )
             return
 
@@ -710,7 +889,7 @@ class MinimalGraspExecutor(Node):
         self.last_cycle_result_message = "Ciclo en ejecucion"
         self.cycle_done_event.clear()
 
-    def _start_cycle_from_cached_grasps(self, reason: str) -> bool:
+    def _start_cycle_from_cached_grasps(self, reason: str, mode: str = "full") -> bool:
         if self.cycle_active:
             self.get_logger().warn("Ya hay un ciclo grasp->IK->MoveIt en ejecucion.")
             return False
@@ -718,6 +897,34 @@ class MinimalGraspExecutor(Node):
         if self.latest_arm_joint_state is None:
             self.get_logger().warn(
                 "No se puede iniciar el ciclo desde grasps cacheados: faltan /joint_states del brazo."
+            )
+            return False
+
+        # "full": grasp->place->home (compatibilidad). "pick": toma y levanta, queda
+        # sosteniendo el objeto (corte tras post_grasp_lift en _advance_after_motion_success).
+        self.cycle_mode = mode
+
+        if not self.use_cached_grasps_first:
+            self._prepare_cycle_start()
+            self.get_logger().info(
+                "Cache de grasps omitido por configuracion; solicitando inferencia fresca."
+            )
+            self._request_new_grasp(f"{reason}: cache omitido")
+            return True
+
+        cache_arrival_ns = max(
+            self.latest_top_grasps_arrival_ns,
+            self.latest_best_grasp_arrival_ns,
+        )
+        cache_age_sec = (
+            (self.get_clock().now().nanoseconds - cache_arrival_ns) / 1e9
+            if cache_arrival_ns > 0
+            else float("inf")
+        )
+        if cache_age_sec > self.cached_grasp_max_age_sec:
+            self._clear_grasp_cache(
+                f"cache vencido: age={cache_age_sec:.1f}s, "
+                f"max={self.cached_grasp_max_age_sec:.1f}s"
             )
             return False
 
@@ -733,7 +940,7 @@ class MinimalGraspExecutor(Node):
                 self.latest_top_grasps_msg.header.frame_id,
                 self.latest_top_grasps_msg.poses,
                 source_label="top_grasps_cached",
-                retry_on_failure=False,
+                stamp=self.latest_top_grasps_msg.header.stamp,
             )
             return True
 
@@ -746,7 +953,7 @@ class MinimalGraspExecutor(Node):
                 self.latest_best_grasp_msg.header.frame_id,
                 [self.latest_best_grasp_msg.pose],
                 source_label="best_grasp_cached",
-                retry_on_failure=False,
+                stamp=self.latest_best_grasp_msg.header.stamp,
             )
             return True
 
@@ -755,14 +962,68 @@ class MinimalGraspExecutor(Node):
         )
         return False
 
-    def _finish_cycle(self, success: bool = False, message: str = ""):
+    def _start_place(self, reason: str) -> bool:
+        """Skill place: lleva el brazo a la pose fija de deposito, abre el gripper y
+        vuelve a home. Reusa la cadena de fases place->after_open->home->verify."""
+        if self.cycle_active:
+            self.get_logger().warn("Ya hay un ciclo o movimiento en ejecucion.")
+            return False
+
+        if self.latest_arm_joint_state is None:
+            self.get_logger().warn(
+                "No se puede iniciar el place: faltan /joint_states del brazo."
+            )
+            return False
+
+        self._prepare_cycle_start()
+        self.cycle_mode = "place"
+        self.get_logger().info(f"Iniciando skill place ({reason}).")
+        self._send_joint_goal(
+            self._joint_state_from_positions(self.place_joint_positions),
+            "place",
+            "deposito/place",
+        )
+        return True
+
+    def _publish_skill_failure(self, failure_type: str, stage: str, detail: str):
+        """Publica (latcheado) el fallo estructurado para el orquestador."""
+        payload = {
+            "ok": not failure_type,
+            "failure_type": failure_type,
+            "stage": stage,
+            "detail": detail,
+            "stamp": time.time(),
+            "source": "move_group_client",
+        }
+        self.skill_failure_pub.publish(String(data=json.dumps(payload)))
+
+    def _classify_finish_failure(self, message: str, phase: str, cycle_mode: str):
+        """Deriva (failure_type, stage) de una finalizacion fallida del ciclo.
+
+        Usa los prefijos de mensaje internos (constantes) y, en su defecto, la
+        fase de movimiento en curso. No hace matching de texto en lenguaje libre.
+        """
+        msg = message or ""
+        for prefix, failure_type, stage in _FINISH_FAILURE_PREFIXES:
+            if prefix in msg:
+                return failure_type, stage
+        if cycle_mode == "place" or phase in _PLACE_PHASES:
+            return "place_failed", "place"
+        return "execution_failed", "execution"
+
+    def _finish_cycle(self, success: bool = False, message: str = "",
+                      failure_type: str = "", stage: str = ""):
+        # Capturar la fase ANTES de resetearla para clasificar el fallo.
+        phase_at_finish = self.current_motion_phase
+        cycle_mode_at_finish = self.cycle_mode
         self._restore_octomap()
         self.cycle_active = False
+        self.cycle_mode = "full"
         self.awaiting_grasp_result = False
         self.request_in_flight = False
         self.current_motion_phase = "idle"
         self.current_gripper_phase = "idle"
-        self.gripper_goal_active = False
+        self.gripper_request_active = False
         self.pending_grasp_goal_state = None
         self.pending_grasp_target_pose = None
         self.pending_motion_log_label = ""
@@ -773,6 +1034,22 @@ class MinimalGraspExecutor(Node):
             if success
             else "Ciclo finalizado con error o cancelacion"
         )
+
+        # Publicar el fallo estructurado (o limpiar si fue exito) para el orquestador.
+        if success:
+            self._publish_skill_failure("", "", self.last_cycle_result_message)
+        else:
+            if not failure_type:
+                failure_type, stage = self._classify_finish_failure(
+                    self.last_cycle_result_message,
+                    phase_at_finish,
+                    cycle_mode_at_finish,
+                )
+            self._publish_skill_failure(
+                failure_type, stage, self.last_cycle_result_message
+            )
+
+        self._clear_grasp_cache("ciclo finalizado; cache consumido")
         self.cycle_done_event.set()
 
     def _handle_run_cycle_request(self, request, response):
@@ -814,6 +1091,67 @@ class MinimalGraspExecutor(Node):
 
         response.success = self.last_cycle_succeeded
         response.message = self.last_cycle_result_message
+        return response
+
+    def _handle_execute_pick_request(self, request, response):
+        del request
+
+        if not self._start_cycle_from_cached_grasps(
+            "servicio execute_pick", mode="pick"
+        ):
+            response.success = False
+            if self.cycle_active:
+                response.message = "Ya hay un ciclo en ejecucion"
+            elif self.latest_arm_joint_state is None:
+                response.message = "Faltan /joint_states del brazo"
+            else:
+                response.message = "No hay grasps cacheados disponibles"
+            return response
+
+        completed = self.cycle_done_event.wait(
+            timeout=self.grasp_result_timeout_sec + 60.0
+        )
+        if not completed:
+            response.success = False
+            response.message = "Timeout esperando que termine el pick"
+            return response
+
+        response.success = self.last_cycle_succeeded
+        response.message = self.last_cycle_result_message
+        return response
+
+    def _handle_execute_place_request(self, request, response):
+        del request
+
+        if not self._start_place("servicio execute_place"):
+            response.success = False
+            if self.cycle_active:
+                response.message = "Ya hay un ciclo en ejecucion"
+            else:
+                response.message = "Faltan /joint_states del brazo"
+            return response
+
+        completed = self.cycle_done_event.wait(timeout=120.0)
+        if not completed:
+            response.success = False
+            response.message = "Timeout esperando que termine el place"
+            return response
+
+        response.success = self.last_cycle_succeeded
+        response.message = self.last_cycle_result_message
+        return response
+
+    def _handle_clear_grasp_cache_request(self, request, response):
+        del request
+
+        if self.cycle_active:
+            response.success = False
+            response.message = "No se puede limpiar cache durante un ciclo activo"
+            return response
+
+        self._clear_grasp_cache("solicitud externa")
+        response.success = True
+        response.message = "Cache local de grasps invalidado"
         return response
 
     def _handle_go_home_request(self, request, response):
@@ -882,6 +1220,7 @@ class MinimalGraspExecutor(Node):
                     self.latest_top_grasps_msg.header.frame_id,
                     self.latest_top_grasps_msg.poses,
                     source_label="top_grasps",
+                    stamp=self.latest_top_grasps_msg.header.stamp,
                 )
                 return
 
@@ -895,6 +1234,7 @@ class MinimalGraspExecutor(Node):
                     self.latest_best_grasp_msg.header.frame_id,
                     [self.latest_best_grasp_msg.pose],
                     source_label="best_grasp_fallback",
+                    stamp=self.latest_best_grasp_msg.header.stamp,
                 )
         except Exception as e:
             self.awaiting_grasp_result = False
@@ -902,15 +1242,32 @@ class MinimalGraspExecutor(Node):
             self._retry_grasp("excepcion en servicio grasp")
 
     def _retry_grasp(self, reason: str):
-        if self.current_retry_count >= self.max_ik_retries:
+        if self.clear_cache_on_ik_failure:
+            self._clear_grasp_cache(reason)
+
+        if self.current_retry_count >= self.max_graspgen_retries:
             self.get_logger().error(
-                f"Se agotaron los reintentos de grasp/IK ({self.max_ik_retries})."
+                "FAILURE_NO_REACHABLE_GRASP_AFTER_RETRIES: "
+                f"se agotaron los reintentos GraspGen ({self.max_graspgen_retries})."
             )
-            self._finish_cycle()
+            self._finish_cycle(
+                message=(
+                    "FAILURE_NO_REACHABLE_GRASP_AFTER_RETRIES: "
+                    f"{reason}; retries={self.max_graspgen_retries}"
+                )
+            )
             return
 
         self.current_retry_count += 1
         self._request_new_grasp(reason)
+
+    def _clear_grasp_cache(self, reason: str):
+        self.latest_best_grasp_msg = None
+        self.latest_best_grasp_arrival_ns = 0
+        self.latest_top_grasps_msg = None
+        self.latest_top_grasps_arrival_ns = 0
+        self.latest_top_scores = []
+        self.get_logger().info(f"Cache local de grasps invalidado: {reason}.")
 
     def _is_target_reachable(self, target_pose: Pose) -> bool:
         radial_distance = (
@@ -1072,6 +1429,37 @@ class MinimalGraspExecutor(Node):
             self.post_grasp_lift_z,
         )
 
+    def _current_grasp_link_pose(self):
+        """Pose actual del link cartesiano (grasp_pose_link) expresada en target_frame,
+        obtenida por TF. Sirve de base para los movimientos relativos del place."""
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                self.target_frame,
+                self.grasp_pose_link,
+                rclpy.time.Time(),
+            )
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().error(
+                f"No se pudo obtener la pose actual de '{self.grasp_pose_link}' "
+                f"en '{self.target_frame}': {e}"
+            )
+            return None
+
+        pose = Pose()
+        pose.position.x = tf.transform.translation.x
+        pose.position.y = tf.transform.translation.y
+        pose.position.z = tf.transform.translation.z
+        pose.orientation = tf.transform.rotation
+        return pose
+
+    def _build_place_vertical_pose(self, distance: float):
+        """Pose objetivo para bajar (distance<0) o subir (distance>0) `distance` metros
+        en world-Z desde la pose actual del TCP."""
+        base_pose = self._current_grasp_link_pose()
+        if base_pose is None:
+            return None
+        return self._offset_pose_along_world_z(base_pose, distance)
+
     def _normalize_goal_near_seed(self, goal_state: JointState, seed_state: JointState):
         normalized_positions = []
         total_distance = 0.0
@@ -1188,34 +1576,76 @@ class MinimalGraspExecutor(Node):
                 "grasp final",
             )
         elif phase == "grasp":
-            self._send_gripper_goal(
-                self.close_gripper_position,
-                self.close_gripper_max_effort,
+            self._call_gripper_service(
+                self.close_gripper_client,
+                self.close_gripper_service_name,
                 "after_close",
                 "cerrar grasp",
             )
         elif phase == "post_grasp_lift":
+            if self.verify_object_detected and not self._grasp_succeeded():
+                self.get_logger().warn(
+                    "GRASP_FALLIDO: el gripper no detecto objeto tras el lift. "
+                    "Volviendo a home en lugar de ir al place."
+                )
+                self._begin_failed_grasp_recovery()
+                return
+            if self.cycle_mode == "pick":
+                self.get_logger().info(
+                    "Skill pick completada: objeto tomado y levantado; el gripper queda "
+                    "cerrado sosteniendo. Esperando una skill de deposito (place/handover)."
+                )
+                self._finish_cycle(
+                    success=True,
+                    message="Objeto tomado (pick); sosteniendo, listo para place/handover",
+                )
+                return
             self._send_joint_goal(
                 self._joint_state_from_positions(self.place_joint_positions),
                 "place",
                 "deposito/place",
             )
         elif phase == "place":
-            self._send_gripper_goal(
-                self.open_gripper_position,
-                self.open_gripper_max_effort,
-                "after_open",
-                "soltar objeto",
+            descend_pose = self._build_place_vertical_pose(-self.place_descend_z)
+            if descend_pose is None or not self._send_cartesian_pose_goal(
+                descend_pose,
+                "place_descend",
+                f"descenso {self.place_descend_z:.3f}m al box",
+            ):
+                self.get_logger().error(
+                    "No se pudo bajar al box; finalizando place sin soltar el objeto."
+                )
+                self._finish_cycle()
+        elif phase == "place_descend":
+            self._call_gripper_service(
+                self.open_gripper_client,
+                self.open_gripper_service_name,
+                "after_open_in_box",
+                "soltar objeto en el box",
+            )
+        elif phase == "place_ascend":
+            self._send_joint_goal(
+                self._joint_state_from_positions(self.home_joint_positions),
+                "home",
+                "home tras place",
             )
         elif phase == "home":
             self.get_logger().info(
                 "Robot en home. Verificando apertura del gripper antes de cerrar el ciclo."
             )
-            self._send_gripper_goal(
-                self.open_gripper_position,
-                self.open_gripper_max_effort,
+            self._call_gripper_service(
+                self.open_gripper_client,
+                self.open_gripper_service_name,
                 "verify_open_at_home",
                 "verificar gripper abierto en home",
+            )
+        elif phase == "home_retry":
+            self.get_logger().warn(
+                "FAILURE_GRASP_NOT_DETECTED: el gripper no detecto objeto; "
+                "robot de vuelta en home. Ciclo finalizado con fallo para que el VLM decida."
+            )
+            self._finish_cycle(
+                message="FAILURE_GRASP_NOT_DETECTED: gripper no detecto objeto tras el grasp."
             )
         else:
             self._finish_cycle()
@@ -1237,7 +1667,7 @@ class MinimalGraspExecutor(Node):
         req.start_state = self._robot_state_from_joint_state(
             self.latest_arm_joint_state
         )
-        req.allowed_planning_time = 25.0
+        req.allowed_planning_time = self.planning_timeout
         req.num_planning_attempts = 10
         req.max_velocity_scaling_factor = 0.1
         req.max_acceleration_scaling_factor = 0.1
@@ -1341,36 +1771,31 @@ class MinimalGraspExecutor(Node):
     def _send_cartesian_grasp_goal(self, target_pose: Pose, log_label: str) -> bool:
         return self._send_cartesian_pose_goal(target_pose, "grasp", log_label)
 
-    def _send_gripper_goal(
+    def _call_gripper_service(
         self,
-        position: float,
-        max_effort: float,
+        client,
+        service_name: str,
         next_phase: str,
         log_label: str,
     ):
-        if self.gripper_goal_active:
-            self.get_logger().warn("Ya hay un goal de gripper en curso.")
+        if self.gripper_request_active:
+            self.get_logger().warn("Ya hay una solicitud de gripper en curso.")
             return
 
-        if not self.gripper_client.wait_for_server(timeout_sec=1.0):
+        if not client.wait_for_service(timeout_sec=1.0):
             self.get_logger().error(
-                f"Action del gripper '{self.gripper_action_name}' no esta disponible."
+                f"Servicio de gripper '{service_name}' no esta disponible."
             )
             self._finish_cycle()
             return
 
-        goal_msg = GripperCommand.Goal()
-        goal_msg.command.position = float(position)
-        goal_msg.command.max_effort = float(max_effort)
-
         self.current_gripper_phase = next_phase
-        self.gripper_goal_active = True
+        self.gripper_request_active = True
         self.get_logger().info(
-            f"Enviando comando al gripper para {log_label}: "
-            f"position={position:.4f}, max_effort={max_effort:.4f}"
+            f"Solicitando al nodo de gripper: {log_label} via '{service_name}'."
         )
-        send_goal_future = self.gripper_client.send_goal_async(goal_msg)
-        send_goal_future.add_done_callback(self._on_gripper_goal_response)
+        future = client.call_async(Trigger.Request())
+        future.add_done_callback(self._on_gripper_service_response)
 
     def _on_move_group_response(self, future):
         try:
@@ -1505,40 +1930,26 @@ class MinimalGraspExecutor(Node):
             )
             self._finish_cycle()
 
-    def _on_gripper_goal_response(self, future):
+    def _on_gripper_service_response(self, future):
         try:
-            goal_handle = future.result()
-            if goal_handle is None or not goal_handle.accepted:
-                self.gripper_goal_active = False
+            response = future.result()
+            phase = self.current_gripper_phase
+            self.gripper_request_active = False
+
+            if response is None:
+                self.get_logger().error("El servicio de gripper no devolvio respuesta.")
+                self._finish_cycle()
+                return
+
+            if not response.success:
                 self.get_logger().error(
-                    f"El gripper rechazo el goal en fase '{self.current_gripper_phase}'."
+                    f"Servicio de gripper fallo en fase '{phase}': {response.message}"
                 )
                 self._finish_cycle()
                 return
 
             self.get_logger().info(
-                f"Goal del gripper aceptado en fase '{self.current_gripper_phase}'."
-            )
-            result_future = goal_handle.get_result_async()
-            result_future.add_done_callback(self._on_gripper_goal_result)
-        except Exception as e:
-            self.gripper_goal_active = False
-            self.get_logger().error(f"Error enviando goal al gripper: {e}")
-            self._finish_cycle()
-
-    def _on_gripper_goal_result(self, future):
-        try:
-            result_wrapper = future.result()
-            phase = self.current_gripper_phase
-            self.gripper_goal_active = False
-
-            if result_wrapper is None:
-                self.get_logger().error("El gripper no devolvio resultado.")
-                self._finish_cycle()
-                return
-
-            self.get_logger().info(
-                f"Comando de gripper completado en fase '{phase}'."
+                f"Servicio de gripper completado en fase '{phase}': {response.message}"
             )
 
             if phase == "after_close":
@@ -1553,11 +1964,32 @@ class MinimalGraspExecutor(Node):
                     "lift vertical post-grasp",
                 ):
                     self._finish_cycle()
+            elif phase == "after_open_in_box":
+                ascend_pose = self._build_place_vertical_pose(self.place_descend_z)
+                if ascend_pose is None or not self._send_cartesian_pose_goal(
+                    ascend_pose,
+                    "place_ascend",
+                    f"ascenso {self.place_descend_z:.3f}m fuera del box",
+                ):
+                    self.get_logger().error(
+                        "No se pudo subir fuera del box; intentando ir a home igualmente."
+                    )
+                    self._send_joint_goal(
+                        self._joint_state_from_positions(self.home_joint_positions),
+                        "home",
+                        "home tras place (sin ascenso)",
+                    )
             elif phase == "after_open":
                 self._send_joint_goal(
                     self._joint_state_from_positions(self.home_joint_positions),
                     "home",
                     "home",
+                )
+            elif phase == "after_failed_grasp_open":
+                self._send_joint_goal(
+                    self._joint_state_from_positions(self.home_joint_positions),
+                    "home_retry",
+                    "home tras grasp fallido",
                 )
             elif phase == "verify_open_at_home":
                 self.get_logger().info(
@@ -1570,8 +2002,8 @@ class MinimalGraspExecutor(Node):
             else:
                 self._finish_cycle()
         except Exception as e:
-            self.gripper_goal_active = False
-            self.get_logger().error(f"Error procesando resultado del gripper: {e}")
+            self.gripper_request_active = False
+            self.get_logger().error(f"Error procesando respuesta del servicio de gripper: {e}")
             self._finish_cycle()
 
     def _on_best_grasp(self, msg: PoseStamped):
@@ -1594,7 +2026,11 @@ class MinimalGraspExecutor(Node):
             msg.header.frame_id,
             [msg.pose],
             source_label="best_grasp_fallback",
+            stamp=msg.header.stamp,
         )
+
+    def _on_top_scores(self, msg: Float32MultiArray):
+        self.latest_top_scores = [float(score) for score in msg.data]
 
     def _on_top_grasps(self, msg: PoseArray):
         self.latest_top_grasps_msg = msg
@@ -1616,36 +2052,72 @@ class MinimalGraspExecutor(Node):
             msg.header.frame_id,
             msg.poses,
             source_label="top_grasps",
+            stamp=msg.header.stamp,
         )
 
     def _process_grasp_candidates(
-        self, frame_id: str, poses, source_label: str, retry_on_failure: bool = True
+        self, frame_id: str, poses, source_label: str, stamp=None
     ):
         try:
             if self.latest_arm_joint_state is None:
                 self.get_logger().warn(
                     "Aun no hay /joint_states completos del brazo; se ignora el grasp."
                 )
-                if retry_on_failure:
-                    self._retry_grasp("sin joint_states del brazo")
-                else:
-                    self._finish_cycle(
-                        message="Sin /joint_states del brazo durante ejecucion cacheada"
-                    )
+                self._retry_grasp("sin joint_states del brazo")
                 return
 
-            transform = self.tf_buffer.lookup_transform(
-                self.target_frame,
-                frame_id,
-                rclpy.time.Time(),
+            if not frame_id:
+                self._finish_cycle(message="INVALID_GRASP_FRAME: frame_id vacio")
+                return
+
+            transform = None
+            if frame_id != self.target_frame:
+                lookup_time = (
+                    rclpy.time.Time.from_msg(stamp)
+                    if stamp is not None
+                    else rclpy.time.Time()
+                )
+                transform = self.tf_buffer.lookup_transform(
+                    self.target_frame,
+                    frame_id,
+                    lookup_time,
+                )
+
+            candidates = list(poses)
+            if self.max_grasps_to_try > 0:
+                candidates = candidates[: self.max_grasps_to_try]
+
+            self.get_logger().info(
+                f"Evaluando {len(candidates)}/{len(poses)} grasps candidatos "
+                f"(source='{source_label}', frame='{frame_id}', "
+                f"planning_frame='{self.target_frame}')."
             )
 
-            for idx, pose in enumerate(poses, start=1):
-                target_pose = do_transform_pose(pose, transform)
+            for idx, pose in enumerate(candidates, start=1):
+                target_pose = (
+                    do_transform_pose(pose, transform)
+                    if transform is not None
+                    else pose
+                )
+                score = (
+                    self.latest_top_scores[idx - 1]
+                    if idx - 1 < len(self.latest_top_scores)
+                    else None
+                )
+                score_label = f"{score:.4f}" if score is not None else "n/a"
+                self.get_logger().info(
+                    f"Candidato {idx}/{len(candidates)}: score={score_label}, "
+                    f"source='{source_label}', frame='{frame_id}' -> '{self.target_frame}', "
+                    f"position=({target_pose.position.x:.4f}, {target_pose.position.y:.4f}, "
+                    f"{target_pose.position.z:.4f}), "
+                    f"orientation=({target_pose.orientation.x:.4f}, "
+                    f"{target_pose.orientation.y:.4f}, {target_pose.orientation.z:.4f}, "
+                    f"{target_pose.orientation.w:.4f})."
+                )
 
                 if not self._is_target_reachable(target_pose):
                     self.get_logger().info(
-                        f"Candidato {idx}/{len(poses)} descartado por alcance "
+                        f"Candidato {idx}/{len(candidates)} rechazado: fuera del workspace "
                         f"(source='{source_label}')."
                     )
                     continue
@@ -1654,13 +2126,12 @@ class MinimalGraspExecutor(Node):
                 goal_state_info = self._solve_ik(ik_pose, self.latest_arm_joint_state)
                 if goal_state_info is None:
                     self.get_logger().info(
-                        f"Candidato {idx}/{len(poses)} sin IK valida "
+                        f"Candidato {idx}/{len(candidates)} rechazado: IK final invalida "
                         f"(source='{source_label}')."
                     )
                     continue
 
                 goal_joint_state, joint_distance = goal_state_info
-                self.current_retry_count = 0
                 self.pending_grasp_goal_state = goal_joint_state
                 self.pending_grasp_target_pose = self._build_cartesian_grasp_pose(
                     target_pose
@@ -1675,7 +2146,7 @@ class MinimalGraspExecutor(Node):
 
                     if not self._is_target_reachable(approach_target_pose):
                         self.get_logger().info(
-                            f"Candidato {idx}/{len(poses)} sin approach alcanzable "
+                            f"Candidato {idx}/{len(candidates)} rechazado: approach fuera del workspace "
                             f"(source='{source_label}')."
                         )
                         continue
@@ -1686,27 +2157,29 @@ class MinimalGraspExecutor(Node):
                     )
                     if approach_goal_info is None:
                         self.get_logger().info(
-                            f"Candidato {idx}/{len(poses)} con IK invalida para approach "
+                            f"Candidato {idx}/{len(candidates)} rechazado: IK de approach invalida "
                             f"(source='{source_label}')."
                         )
                         continue
 
                     approach_joint_state, approach_joint_distance = approach_goal_info
+                    self.current_retry_count = 0
                     self._send_joint_goal(
                         approach_joint_state,
                         "approach",
                         "approach/pregrasp",
                     )
                     self.get_logger().info(
-                        f"Usando candidato {idx}/{len(poses)} de '{source_label}'. "
+                        f"Usando candidato {idx}/{len(candidates)} de '{source_label}'. "
                         f"Approach resuelto con axis='{self.approach_axis}', "
                         f"offset={self.approach_sign * self.approach_offset:.3f} m, "
                         f"distancia_joint={approach_joint_distance:.3f} rad"
                     )
                 else:
+                    self.current_retry_count = 0
                     self._send_joint_goal(goal_joint_state, "grasp", "grasp final")
                     self.get_logger().info(
-                        f"Usando candidato {idx}/{len(poses)} de '{source_label}' sin approach."
+                        f"Usando candidato {idx}/{len(candidates)} de '{source_label}' sin approach."
                     )
 
                 q_start = ", ".join(
@@ -1726,7 +2199,8 @@ class MinimalGraspExecutor(Node):
 
                 self.get_logger().info(
                     "Objetivo de grasp resuelto por IK. "
-                    f"candidate={idx}/{len(poses)} | "
+                    f"candidate={idx}/{len(candidates)} | "
+                    f"score={score_label} | "
                     f"source='{source_label}' | "
                     f"distancia_joint={joint_distance:.3f} rad | "
                     f"q_start=[{q_start}] | q_goal=[{q_goal}]"
@@ -1734,24 +2208,14 @@ class MinimalGraspExecutor(Node):
                 return
 
             self.get_logger().warn(
-                f"Ninguno de los {len(poses)} grasps candidatos produjo una IK/approach valida "
-                f"(source='{source_label}')."
+                f"NO_REACHABLE_GRASP: ninguno de los {len(candidates)} grasps candidatos "
+                f"produjo una IK/approach valida (source='{source_label}')."
             )
-            if retry_on_failure:
-                self._retry_grasp("sin candidatos con IK valida")
-            else:
-                self._finish_cycle(
-                    message="Ningun grasp cacheado produjo una IK/approach valida"
-                )
+            self._retry_grasp("NO_REACHABLE_GRASP: sin candidatos con IK/approach valida")
 
         except Exception as e:
             self.get_logger().error(f"Error: {e}")
-            if retry_on_failure:
-                self._retry_grasp("excepcion procesando grasp")
-            else:
-                self._finish_cycle(
-                    message=f"Excepcion procesando grasps cacheados: {e}"
-                )
+            self._retry_grasp(f"excepcion procesando grasp: {e}")
 
 
 def main():

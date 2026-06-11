@@ -128,6 +128,9 @@ def generate_launch_description():
         launch_arguments={
             "pointcloud.enable": "true",
             "align_depth.enable": "true",
+            # El URDF de MoveIt ya publica el subarbol nominal completo de la D435i.
+            # Mantener una sola autoridad TF evita transformadas duplicadas.
+            "publish_tf": "false",
             "depth_module.depth_profile": "640x480x15",  # Bajamos de 30 a 15 FPS
             "rgb_camera.color_profile": "640x480x15",   # Bajamos resolución y FPS
             "enable_sync": "true",                      # Ayuda a que los flujos no se desfasen

@@ -12,7 +12,9 @@
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>
   <depend>rviz_common</depend>
+  <depend>std_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>ur5_manipulation</depend>
 
   <exec_depend>rviz2</exec_depend>
 

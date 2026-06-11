@@ -31,6 +31,8 @@ HWI::CallbackReturn RobotiqHandeHardwareInterface::on_init(const HWI::HardwareIn
     telemetry_node_ = std::make_shared<rclcpp::Node>("robotiq_hande_telemetry");
     current_publisher_ =
         telemetry_node_->create_publisher<std_msgs::msg::Float64>("~/current", 10);
+    object_detected_publisher_ =
+        telemetry_node_->create_publisher<std_msgs::msg::Bool>("~/object_detected", 10);
     log_parsed_urdf_config();
 
     th_comm_enabled_.store(false);
@@ -241,6 +243,11 @@ void RobotiqHandeHardwareInterface::gripper_communication() {
                 std_msgs::msg::Float64 msg;
                 msg.data = gripper_driver_.get_current();
                 current_publisher_->publish(msg);
+            }
+            if(object_detected_publisher_) {
+                std_msgs::msg::Bool msg;
+                msg.data = gripper_driver_.get_status().object_detected;
+                object_detected_publisher_->publish(msg);
             }
 
             {

@@ -1,0 +1,30 @@
+# /robot/perceive
+# Enriquece la salida semantica del VLM (box + puntos normalizados) con SAM2 y
+# depth: produce mascara, nube de puntos y pose aproximada por objeto.
+#
+# objects_json (request): JSON array, cada elemento:
+#   {
+#     "name": "pato",
+#     "object_box_xyxy_norm": [x1, y1, x2, y2],          # normalizado [0,1]
+#     "positive_points_xy_norm": [[x, y], ...],          # normalizado [0,1]
+#     "negative_points_xy_norm": [[x, y], ...],          # normalizado [0,1]
+#     "selected_safe_part": "cuerpo",
+#     "forbidden_parts": ["cabeza"],
+#     "force_level": "low"
+#   }
+float64 stamp           # stamp devuelto por /robot/get_camera_image (0 => capturar nuevo)
+string objects_json     # ver formato arriba
+---
+# objects_json (response): JSON array, cada elemento:
+#   {
+#     "name": "pato",
+#     "segmentation_ok": true,
+#     "mask_id": "mask_01",
+#     "pose_estimate": [x, y, z, qx, qy, qz, qw],        # en frame base del robot
+#     "cloud_topic": "/perception/pato/points",
+#     "num_cloud_points": 4231
+#   }
+bool success
+string objects_json
+string failure_type      # "" si exito; ej. "segmentation_failed", "object_not_found"
+string detail            # info de debugging

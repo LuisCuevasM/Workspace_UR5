@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 
-import copy
 import math
 
 import rclpy
 from geometry_msgs.msg import Pose, PoseStamped, Quaternion
-from moveit_msgs.action import ExecuteTrajectory
-from moveit_msgs.msg import MoveItErrorCodes, RobotState
+from moveit_msgs.action import ExecuteTrajectory, MoveGroup
+from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes, RobotState
 from moveit_msgs.srv import GetCartesianPath
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, String
 from std_srvs.srv import Trigger
 from tf2_geometry_msgs import do_transform_pose
 from tf2_ros import Buffer, TransformListener
@@ -27,6 +25,8 @@ class ScanMotionExecutorNode(Node):
         self.declare_parameter("best_grasp_topic", "/graspgen/best_grasp")
         self.declare_parameter("execute_scan_service", "/point_cloud_scanner/execute_scan")
         self.declare_parameter("scan_dwell_event_topic", "/point_cloud_scanner/scan_dwell")
+        self.declare_parameter("capture_done_topic", "/point_cloud_scanner/capture_done")
+        self.declare_parameter("scan_event_topic", "/point_cloud_scanner/scan_event")
         self.declare_parameter("target_frame", "base_link")
         self.declare_parameter("tcp_link", "robotiq_hande_end")
         self.declare_parameter("group_name", "ur_arm")
@@ -38,7 +38,32 @@ class ScanMotionExecutorNode(Node):
         self.declare_parameter("scan_direction", "right")
         self.declare_parameter("scan_height_offset", 0.0)
         self.declare_parameter("scan_waypoints", 6)
-        self.declare_parameter("scan_dwell_sec", 2.0)
+        self.declare_parameter("scan_dwell_skip_count", 0)
+        self.declare_parameter("capture_ack_timeout_sec", 15.0)
+        # Retorno a home (MoveGroup, planificacion en espacio de juntas)
+        self.declare_parameter("return_home_after_scan", True)
+        self.declare_parameter("move_action_name", "/move_action")
+        self.declare_parameter(
+            "arm_joint_names",
+            [
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            ],
+        )
+        self.declare_parameter(
+            "home_joint_positions",
+            [0.8901, -1.0472, -2.0245, -1.0297, 1.4835, 3.3335],
+        )
+        self.declare_parameter("planning_pipeline", "ompl")
+        self.declare_parameter("planner_id", "RRTConnectkConfigDefault")
+        self.declare_parameter("home_allowed_planning_time", 10.0)
+        self.declare_parameter("home_goal_joint_tolerance", 1.0e-3)
+        self.declare_parameter("home_velocity_scaling_factor", 0.2)
+        self.declare_parameter("home_acceleration_scaling_factor", 0.2)
         self.declare_parameter("roll_offset_deg", 90.0)
         self.declare_parameter("look_at_object", True)
         self.declare_parameter("look_at_axis", "z")
@@ -47,14 +72,13 @@ class ScanMotionExecutorNode(Node):
         self.declare_parameter("cartesian_min_fraction", 0.85)
         self.declare_parameter("max_velocity_scaling_factor", 0.03)
         self.declare_parameter("max_acceleration_scaling_factor", 0.03)
-        self.declare_parameter("scan_dwell_joint_tolerance", 0.015)
-        self.declare_parameter("scan_dwell_confirm_sec", 0.2)
-        self.declare_parameter("scan_dwell_event_fallback_sec", 1.0)
         self.declare_parameter("avoid_collisions", True)
 
         self.best_grasp_topic = self.get_parameter("best_grasp_topic").value
         self.execute_scan_service = self.get_parameter("execute_scan_service").value
         self.scan_dwell_event_topic = self.get_parameter("scan_dwell_event_topic").value
+        self.capture_done_topic = self.get_parameter("capture_done_topic").value
+        self.scan_event_topic = self.get_parameter("scan_event_topic").value
         self.target_frame = self.get_parameter("target_frame").value
         self.tcp_link = self.get_parameter("tcp_link").value
         self.group_name = self.get_parameter("group_name").value
@@ -66,8 +90,11 @@ class ScanMotionExecutorNode(Node):
         self.latest_grasp = None
         self.latest_joint_state = None
         self.scan_active = False
-        self.dwell_events = []
-        self.execution_started_at = None
+        # Maquina de estados del handshake segmento-a-segmento.
+        self.scan_waypoints_abs = []
+        self.current_index = 0
+        self.awaiting_ack = False
+        self.ack_timer = None
 
         self.cb_group = ReentrantCallbackGroup()
         self.tf_buffer = Buffer()
@@ -83,9 +110,20 @@ class ScanMotionExecutorNode(Node):
             self.execute_trajectory_action,
             callback_group=self.cb_group,
         )
+        self.move_group_client = ActionClient(
+            self,
+            MoveGroup,
+            self.get_parameter("move_action_name").value,
+            callback_group=self.cb_group,
+        )
         self.dwell_event_pub = self.create_publisher(
             Int32,
             self.scan_dwell_event_topic,
+            10,
+        )
+        self.scan_event_pub = self.create_publisher(
+            String,
+            self.scan_event_topic,
             10,
         )
 
@@ -103,6 +141,13 @@ class ScanMotionExecutorNode(Node):
             50,
             callback_group=self.cb_group,
         )
+        self.create_subscription(
+            Int32,
+            self.capture_done_topic,
+            self._on_capture_done,
+            10,
+            callback_group=self.cb_group,
+        )
         self.create_service(
             Trigger,
             self.execute_scan_service,
@@ -112,7 +157,9 @@ class ScanMotionExecutorNode(Node):
 
         self.get_logger().info(
             f"Listo. Servicio de ejecucion: '{self.execute_scan_service}'. "
-            f"Eventos de pausa en '{self.scan_dwell_event_topic}'."
+            f"Aviso de llegada en '{self.scan_dwell_event_topic}', "
+            f"ack del scanner en '{self.capture_done_topic}', "
+            f"eventos de ciclo en '{self.scan_event_topic}'."
         )
 
     def _on_grasp(self, msg):
@@ -120,7 +167,6 @@ class ScanMotionExecutorNode(Node):
 
     def _on_joint_state(self, msg):
         self.latest_joint_state = msg
-        self._publish_reached_dwell_events()
 
     def _handle_execute_scan(self, request, response):
         del request
@@ -152,9 +198,17 @@ class ScanMotionExecutorNode(Node):
             return response
 
         self.scan_active = True
-        self._request_cartesian_path(waypoints)
+        self.scan_waypoints_abs = waypoints
+        self.current_index = 0
+        self.awaiting_ack = False
+        self.get_logger().info(
+            f"Scan iniciado: {len(waypoints)} puntos, espera real por segmento."
+        )
+        self._execute_segment(0)
         response.success = True
-        response.message = f"Scan solicitado con {len(waypoints)} waypoints."
+        response.message = (
+            f"Scan solicitado con {len(waypoints)} waypoints (handshake por punto)."
+        )
         return response
 
     def _pose_in_target_frame(self, msg):
@@ -262,9 +316,28 @@ class ScanMotionExecutorNode(Node):
         y_axis = self._cross(z_axis, x_axis)
         return self._quaternion_from_axes(x_axis, y_axis, z_axis)
 
+    def _execute_segment(self, index):
+        """Planifica y ejecuta el tramo cartesiano hasta el waypoint `index`."""
+        if not self.scan_active:
+            return
+        if index >= len(self.scan_waypoints_abs):
+            self.get_logger().error(
+                f"Indice de segmento fuera de rango: {index}."
+            )
+            self._abort_scan()
+            return
+
+        self.current_index = index
+        target = self.scan_waypoints_abs[index]
+        self.get_logger().info(
+            f"Moviendo al punto de escaneo {index + 1}/{len(self.scan_waypoints_abs)}."
+        )
+        # Tramo individual desde la pose actual hasta el waypoint objetivo.
+        self._request_cartesian_path([target])
+
     def _request_cartesian_path(self, waypoints):
         if not self.cartesian_client.wait_for_service(timeout_sec=1.0):
-            self.scan_active = False
+            self._abort_scan()
             self.get_logger().error(
                 f"Servicio cartesiano '{self.cartesian_path_service}' no disponible."
             )
@@ -293,14 +366,14 @@ class ScanMotionExecutorNode(Node):
             response = future.result()
             min_fraction = float(self.get_parameter("cartesian_min_fraction").value)
             if response.error_code.val != MoveItErrorCodes.SUCCESS:
-                self.scan_active = False
+                self._abort_scan()
                 self.get_logger().error(
                     f"GetCartesianPath fallo: error_code={response.error_code.val}, "
                     f"fraction={response.fraction:.3f}"
                 )
                 return
             if response.fraction < min_fraction:
-                self.scan_active = False
+                self._abort_scan()
                 self.get_logger().error(
                     f"Path incompleto: fraction={response.fraction:.3f} < {min_fraction:.3f}"
                 )
@@ -310,10 +383,9 @@ class ScanMotionExecutorNode(Node):
                 f"Path cartesiano listo: fraction={response.fraction:.3f}. Ejecutando."
             )
             trajectory = self._scale_trajectory_speed(response.solution)
-            trajectory = self._insert_scan_dwells(trajectory)
             self._execute_trajectory(trajectory)
         except Exception as exc:
-            self.scan_active = False
+            self._abort_scan()
             self.get_logger().error(f"Error procesando path cartesiano: {exc}")
 
     def _scale_trajectory_speed(self, trajectory):
@@ -344,80 +416,9 @@ class ScanMotionExecutorNode(Node):
         )
         return trajectory
 
-    def _insert_scan_dwells(self, trajectory):
-        dwell_sec = max(0.0, float(self.get_parameter("scan_dwell_sec").value))
-        waypoint_count = max(3, int(self.get_parameter("scan_waypoints").value))
-        points = trajectory.joint_trajectory.points
-        if dwell_sec <= 0.0 or len(points) < 2:
-            self.dwell_events = []
-            return trajectory
-
-        dwell_ns = int(dwell_sec * 1_000_000_000)
-        dwell_indices = {
-            max(1, min(len(points) - 1, round((index + 1) * (len(points) - 1) / waypoint_count)))
-            for index in range(waypoint_count)
-        }
-
-        new_points = []
-        added_ns = 0
-        joint_names = list(trajectory.joint_trajectory.joint_names)
-        dwell_events = []
-        dwell_number = 0
-        for index, point in enumerate(points):
-            point_copy = copy.deepcopy(point)
-            original_ns = self._point_time_ns(point)
-            self._set_point_time_ns(point_copy, original_ns + added_ns)
-
-            if index in dwell_indices:
-                self._zero_point_motion(point_copy)
-                new_points.append(point_copy)
-                dwell_events.append(
-                    {
-                        "index": dwell_number,
-                        "time_ns": original_ns + added_ns,
-                        "joint_names": joint_names,
-                        "positions": list(point_copy.positions),
-                        "reached_since": None,
-                        "published": False,
-                    }
-                )
-                dwell_number += 1
-                added_ns += dwell_ns
-
-                dwell_point = copy.deepcopy(point_copy)
-                self._set_point_time_ns(dwell_point, original_ns + added_ns)
-                self._zero_point_motion(dwell_point)
-                new_points.append(dwell_point)
-            else:
-                new_points.append(point_copy)
-
-        trajectory.joint_trajectory.points = new_points
-        self.dwell_events = dwell_events
-        self.get_logger().info(
-            f"Pausas de escaneo insertadas: {len(dwell_indices)} vertices x "
-            f"{dwell_sec:.1f}s."
-        )
-        return trajectory
-
-    @staticmethod
-    def _point_time_ns(point):
-        return point.time_from_start.sec * 1_000_000_000 + point.time_from_start.nanosec
-
-    @staticmethod
-    def _set_point_time_ns(point, total_ns):
-        point.time_from_start.sec = total_ns // 1_000_000_000
-        point.time_from_start.nanosec = total_ns % 1_000_000_000
-
-    @staticmethod
-    def _zero_point_motion(point):
-        if point.velocities:
-            point.velocities = [0.0 for _ in point.velocities]
-        if point.accelerations:
-            point.accelerations = [0.0 for _ in point.accelerations]
-
     def _execute_trajectory(self, trajectory):
         if not self.execute_client.wait_for_server(timeout_sec=1.0):
-            self.scan_active = False
+            self._abort_scan()
             self.get_logger().error(
                 f"Action '{self.execute_trajectory_action}' no disponible."
             )
@@ -432,121 +433,252 @@ class ScanMotionExecutorNode(Node):
         try:
             goal_handle = future.result()
             if goal_handle is None or not goal_handle.accepted:
-                self.scan_active = False
-                self.execution_started_at = None
+                self._abort_scan()
                 self.get_logger().error("ExecuteTrajectory rechazo el goal.")
                 return
 
-            self.execution_started_at = self.get_clock().now()
             result_future = goal_handle.get_result_async()
             result_future.add_done_callback(self._on_execute_result)
         except Exception as exc:
-            self.scan_active = False
-            self.execution_started_at = None
+            self._abort_scan()
             self.get_logger().error(f"Error enviando ExecuteTrajectory: {exc}")
 
     def _on_execute_result(self, future):
         try:
             result = future.result()
-            self.scan_active = False
-            self.execution_started_at = None
             if result is None:
+                self._abort_scan()
                 self.get_logger().error("ExecuteTrajectory no devolvio resultado.")
                 return
 
             error_code = result.result.error_code.val
             if error_code != MoveItErrorCodes.SUCCESS:
+                self._abort_scan()
                 self.get_logger().error(
-                    f"Fallo ejecutando trayectoria: error_code={error_code}"
+                    f"Fallo ejecutando tramo: error_code={error_code}"
                 )
                 return
 
-            self.get_logger().info("Trayectoria de scan ejecutada correctamente.")
+            # El robot esta fisicamente detenido en el waypoint actual.
+            self._on_segment_arrived()
         except Exception as exc:
-            self.scan_active = False
-            self.execution_started_at = None
+            self._abort_scan()
             self.get_logger().error(f"Error procesando resultado de ejecucion: {exc}")
 
-    def _publish_reached_dwell_events(self):
-        if not self.scan_active or self.latest_joint_state is None:
+    # ------------------------------------------------------------------ #
+    # Handshake motion <-> scanner                                         #
+    # ------------------------------------------------------------------ #
+
+    def _on_segment_arrived(self):
+        if not self.scan_active:
             return
 
-        now = self.get_clock().now()
-        tolerance = max(
-            0.0,
-            float(self.get_parameter("scan_dwell_joint_tolerance").value),
-        )
-        confirm_duration = Duration(
-            seconds=max(
-                0.0,
-                float(self.get_parameter("scan_dwell_confirm_sec").value),
+        index = self.current_index
+        skip_count = max(0, int(self.get_parameter("scan_dwell_skip_count").value))
+        skip_count = min(skip_count, len(self.scan_waypoints_abs))
+        if index < skip_count:
+            self.get_logger().info(
+                f"Punto {index + 1} de paso (sin captura, skip_count={skip_count})."
             )
-        )
-
-        for event in self.dwell_events:
-            if event["published"]:
-                continue
-            if self._dwell_event_timed_out(event, now):
-                self.get_logger().warn(
-                    f"No confirme por joint_states el punto {event['index'] + 1}; "
-                    "publicando evento por tiempo de trayectoria."
-                )
-                self._publish_dwell_event(event["index"])
-                event["published"] = True
-                return
-            if not self._joint_state_matches(event, tolerance):
-                event["reached_since"] = None
-                return
-            if event["reached_since"] is None:
-                event["reached_since"] = now
-                return
-            if now - event["reached_since"] < confirm_duration:
-                return
-
-            self._publish_dwell_event(event["index"])
-            event["published"] = True
+            self._advance_to_next()
             return
 
-    def _dwell_event_timed_out(self, event, now):
-        if self.execution_started_at is None:
-            return False
-        fallback_sec = max(
-            0.0,
-            float(self.get_parameter("scan_dwell_event_fallback_sec").value),
-        )
-        elapsed = now - self.execution_started_at
-        fallback_ns = int(fallback_sec * 1_000_000_000)
-        return elapsed.nanoseconds >= event["time_ns"] + fallback_ns
-
-    def _joint_state_matches(self, event, tolerance):
-        joint_position_by_name = {
-            name: position
-            for name, position in zip(
-                self.latest_joint_state.name,
-                self.latest_joint_state.position,
-            )
-        }
-        errors = []
-        for name, target in zip(event["joint_names"], event["positions"]):
-            current = joint_position_by_name.get(name)
-            if current is None:
-                return False
-            errors.append(abs(current - target))
-        return bool(errors) and max(errors) <= tolerance
-
-    def _publish_dwell_event(self, dwell_index):
-        msg = Int32()
-        msg.data = int(dwell_index)
-        self.dwell_event_pub.publish(msg)
         self.get_logger().info(
-            f"Robot detenido en punto de escaneo {dwell_index + 1}; evento publicado."
+            f"Llegue al punto {index + 1} y me detengo; "
+            "aviso al scanner y espero confirmacion de captura."
         )
+        msg = Int32()
+        msg.data = int(index)
+        self.dwell_event_pub.publish(msg)
+        self.awaiting_ack = True
+        self._start_ack_timer()
+
+    def _on_capture_done(self, msg):
+        if not self.scan_active or not self.awaiting_ack:
+            return
+        if int(msg.data) != self.current_index:
+            self.get_logger().warn(
+                f"Ack del scanner para punto {int(msg.data) + 1} no coincide con "
+                f"el punto actual {self.current_index + 1}; lo ignoro."
+            )
+            return
+
+        self._cancel_ack_timer()
+        self.awaiting_ack = False
+        self.get_logger().info(
+            f"Scanner confirmo captura del punto {self.current_index + 1}; continuo."
+        )
+        self._advance_to_next()
+
+    def _advance_to_next(self):
+        next_index = self.current_index + 1
+        if next_index < len(self.scan_waypoints_abs):
+            self._execute_segment(next_index)
+        else:
+            self._finish_arc_and_home()
+
+    def _start_ack_timer(self):
+        self._cancel_ack_timer()
+        timeout = max(0.0, float(self.get_parameter("capture_ack_timeout_sec").value))
+        if timeout <= 0.0:
+            return
+        self.ack_timer = self.create_timer(
+            timeout,
+            self._on_ack_timeout,
+            callback_group=self.cb_group,
+        )
+
+    def _cancel_ack_timer(self):
+        if self.ack_timer is not None:
+            self.ack_timer.cancel()
+            self.destroy_timer(self.ack_timer)
+            self.ack_timer = None
+
+    def _on_ack_timeout(self):
+        self._cancel_ack_timer()
+        if not self.scan_active or not self.awaiting_ack:
+            return
+        self.get_logger().warn(
+            f"Sin ack del scanner para el punto {self.current_index + 1}; "
+            "continuo igual para no quedar bloqueado."
+        )
+        self.awaiting_ack = False
+        self._advance_to_next()
+
+    def _finish_arc_and_home(self):
+        self.get_logger().info(
+            "Arco de escaneo completado; aviso 'scan_finished' (no guardar mas nubes)."
+        )
+        self._publish_scan_event("scan_finished")
+        if bool(self.get_parameter("return_home_after_scan").value):
+            self._return_home()
+        else:
+            self.get_logger().info(
+                "return_home_after_scan=False; aviso 'at_home' para procesar."
+            )
+            self._publish_scan_event("at_home")
+            self.scan_active = False
+
+    # ------------------------------------------------------------------ #
+    # Retorno a home (MoveGroup, espacio de juntas)                        #
+    # ------------------------------------------------------------------ #
+
+    def _return_home(self):
+        if self.latest_joint_state is None:
+            self.get_logger().warn(
+                "No hay /joint_states; no puedo volver a home. Aviso 'at_home' igual."
+            )
+            self._publish_scan_event("at_home")
+            self.scan_active = False
+            return
+        if not self.move_group_client.wait_for_server(timeout_sec=2.0):
+            self.get_logger().error(
+                "MoveGroup no disponible para volver a home. Aviso 'at_home' igual."
+            )
+            self._publish_scan_event("at_home")
+            self.scan_active = False
+            return
+
+        arm_joint_names = list(self.get_parameter("arm_joint_names").value)
+        home_positions = list(self.get_parameter("home_joint_positions").value)
+        tolerance = float(self.get_parameter("home_goal_joint_tolerance").value)
+
+        constraints = Constraints()
+        for joint_name, joint_position in zip(arm_joint_names, home_positions):
+            constraints.joint_constraints.append(
+                JointConstraint(
+                    joint_name=joint_name,
+                    position=float(joint_position),
+                    tolerance_above=tolerance,
+                    tolerance_below=tolerance,
+                    weight=1.0,
+                )
+            )
+
+        goal = MoveGroup.Goal()
+        goal.planning_options.plan_only = False
+        req = goal.request
+        req.group_name = self.group_name
+        req.pipeline_id = self.get_parameter("planning_pipeline").value
+        req.planner_id = self.get_parameter("planner_id").value
+        req.start_state = self._full_robot_state(self.latest_joint_state)
+        req.allowed_planning_time = float(
+            self.get_parameter("home_allowed_planning_time").value
+        )
+        req.num_planning_attempts = 5
+        req.max_velocity_scaling_factor = float(
+            self.get_parameter("home_velocity_scaling_factor").value
+        )
+        req.max_acceleration_scaling_factor = float(
+            self.get_parameter("home_acceleration_scaling_factor").value
+        )
+        req.goal_constraints.append(constraints)
+
+        self.get_logger().info("Volviendo a home...")
+        send_goal_future = self.move_group_client.send_goal_async(goal)
+        send_goal_future.add_done_callback(self._on_home_goal_response)
+
+    def _on_home_goal_response(self, future):
+        try:
+            goal_handle = future.result()
+            if goal_handle is None or not goal_handle.accepted:
+                self.get_logger().error("MoveGroup rechazo el goal de home.")
+                self._finish_after_home()
+                return
+            result_future = goal_handle.get_result_async()
+            result_future.add_done_callback(self._on_home_goal_result)
+        except Exception as exc:
+            self.get_logger().error(f"Error enviando retorno a home: {exc}")
+            self._finish_after_home()
+
+    def _on_home_goal_result(self, future):
+        try:
+            result = future.result()
+            if result is None:
+                self.get_logger().error("MoveGroup no devolvio resultado para home.")
+            elif result.result.error_code.val != MoveItErrorCodes.SUCCESS:
+                self.get_logger().error(
+                    f"Fallo el retorno a home. error_code="
+                    f"{result.result.error_code.val}"
+                )
+            else:
+                self.get_logger().info("Llegue a home.")
+        except Exception as exc:
+            self.get_logger().error(f"Error procesando resultado de home: {exc}")
+        self._finish_after_home()
+
+    def _finish_after_home(self):
+        self.get_logger().info(
+            "Aviso 'at_home': el scanner puede fusionar y publicar la nube completa."
+        )
+        self._publish_scan_event("at_home")
+        self.scan_active = False
+        self.awaiting_ack = False
+
+    def _publish_scan_event(self, text):
+        msg = String()
+        msg.data = str(text)
+        self.scan_event_pub.publish(msg)
+
+    def _abort_scan(self):
+        self._cancel_ack_timer()
+        self.scan_active = False
+        self.awaiting_ack = False
 
     @staticmethod
     def _robot_state_from_joint_state(joint_state):
         robot_state = RobotState()
         robot_state.joint_state = joint_state
         robot_state.is_diff = True
+        return robot_state
+
+    @staticmethod
+    def _full_robot_state(joint_state):
+        robot_state = RobotState()
+        robot_state.joint_state.header = joint_state.header
+        robot_state.joint_state.name = list(joint_state.name)
+        robot_state.joint_state.position = list(joint_state.position)
+        robot_state.is_diff = False
         return robot_state
 
     @staticmethod

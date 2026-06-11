@@ -1,0 +1,22 @@
+# /robot/grasp | /robot/pick | /robot/place | /robot/pick_place
+#               /robot/push | /robot/handover (declaradas, no implementadas)
+#
+# Request comun para todas las skills.
+string object_name
+string target_location          # vacio para grasp/pick; requerido para place/pick_place
+bool clear_cached_grasps        # true => invalidar top_grasps_cached y re-ejecutar GraspGen
+bool force_new_perception       # true => re-capturar RGB-D y re-segmentar con SAM2
+string vlm_context_json         # PerceivedObject serializado (box/puntos/mask_id/force_level/...)
+int32 attempt_number            # numero de intento (1-indexado) para logging
+---
+bool success
+# stage: perception|segmentation|grasp_generation|collision_filter|ik|execution|gripper|place|done
+string stage
+# failure_type: "" si success; o uno de:
+#   object_not_found | segmentation_failed | no_grasps_generated |
+#   no_collision_free_grasps | ik_failed | execution_failed |
+#   gripper_failed | object_slipped | place_failed | skill_not_available
+string failure_type
+string grasp_id
+string mask_id
+string detail_json              # JSON libre con logs, scores, etc.

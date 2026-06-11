@@ -305,7 +305,7 @@ class OctomapHomeCloudManager(Node):
 
         self.cached_home_cloud = transformed_cloud
         self.waiting_for_fresh_cloud = False
-        self.get_logger().info(
+        self.get_logger().debug(
             "Nube fresca sin objeto capturada en home. "
             f"Se republicara continuamente para OctoMap en '{self.target_frame}'."
         )
