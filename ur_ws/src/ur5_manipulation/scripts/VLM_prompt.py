@@ -34,7 +34,7 @@ except ImportError:
     SetVlmInstruction = None
 
 
-_DEFAULT_VLM_SERVER_URL = "http://172.17.0.2:8888/infer_image"
+_DEFAULT_VLM_SERVER_URL = "http://192.168.1.110:8888/infer_image"
 
 
 class SemanticPartPlan(BaseModel):
@@ -550,53 +550,113 @@ def build_sam2_prompt_payload(
 def force_level_to_gripper_config(plan: SemanticPartPlan) -> dict:
     mapping = {
         "very_low": {
-            "close_gripper_position": 0.012,
+            "close_gripper_position": 0.0,
             "close_gripper_force": 0.8,
             "close_gripper_velocity": 0.03,
         },
         "low": {
-            "close_gripper_position": 0.010,
+            "close_gripper_position": 0.0,
             "close_gripper_force": 1.0,
             "close_gripper_velocity": 0.04,
         },
         "medium": {
-            "close_gripper_position": 0.006,
+            "close_gripper_position": 0.0,
             "close_gripper_force": 1.5,
             "close_gripper_velocity": 0.05,
         },
         "high": {
-            "close_gripper_position": 0.002,
+            "close_gripper_position": 0.0,
             "close_gripper_force": 2.0,
             "close_gripper_velocity": 0.06,
         },
     }
     config = dict(mapping.get(plan.force_level, mapping["medium"]))
 
-    fragile_text = " ".join(
-        [
-            plan.target_object,
-            plan.selected_safe_part,
-            " ".join(plan.forbidden_parts),
-            plan.reason,
-        ]
-    ).lower()
-    fragile_terms = (
-        "lente",
-        "lentes",
-        "glasses",
-        "cristal",
-        "cristales",
-        "vidrio",
-        "fragil",
-        "frágil",
-    )
-    if any(term in fragile_text for term in fragile_terms):
-        config["close_gripper_position"] = max(
-            config["close_gripper_position"],
-            0.010,
-        )
+    #fragile_text = " ".join(
+    #    [
+    #        plan.target_object,
+    #        plan.selected_safe_part,
+    #        " ".join(plan.forbidden_parts),
+    #        plan.reason,
+    #    ]
+    #).lower()
+    #fragile_terms = (
+    #    "lente",
+    #    "lentes",
+    #    "glasses",
+    #    "cristal",
+    #    "cristales",
+    #    "vidrio",
+    #    "fragil",
+    #    "frágil",
+    #)
+    #if any(term in fragile_text for term in fragile_terms):
+    #    config["close_gripper_position"] = max(
+    #        config["close_gripper_position"],
+    #        0.010,
+    #    )
 
     return config
+
+
+
+def _build_sam2_payload_from_selection(image, selection: dict) -> dict:
+    width, height = image.size
+    bbox = selection.get("bbox") or []
+    pos_pts = selection.get("positive_points") or []
+    neg_pts = selection.get("negative_points") or []
+
+    if len(bbox) == 4:
+        box_xyxy = [
+            float(max(0, min(width - 1, round(bbox[0] * width)))),
+            float(max(0, min(height - 1, round(bbox[1] * height)))),
+            float(max(0, min(width - 1, round(bbox[2] * width)))),
+            float(max(0, min(height - 1, round(bbox[3] * height)))),
+        ]
+    else:
+        box_xyxy = []
+
+    def _to_px(pts, w, h):
+        return [
+            [float(max(0, min(w - 1, round(p[0] * w)))), float(max(0, min(h - 1, round(p[1] * h))))]
+            for p in pts
+        ]
+
+    pos_px = _to_px(pos_pts, width, height)
+    neg_px = _to_px(neg_pts, width, height)
+
+    conf_raw = selection.get("confidence", 0.5)
+    if isinstance(conf_raw, (int, float)):
+        conf_str = "high" if conf_raw >= 0.8 else ("medium" if conf_raw >= 0.5 else "low")
+    else:
+        conf_str = str(conf_raw)
+
+    return {
+        "target_object": selection.get("object", ""),
+        "selected_safe_part": selection.get("selected_safe_part", ""),
+        "forbidden_parts": selection.get("forbidden_parts") or [],
+        "force_level": selection.get("force_level", "low"),
+        "confidence": conf_str,
+        "reason": "",
+        "image_width": width,
+        "image_height": height,
+        "object_box_xyxy_norm": bbox,
+        "positive_points_xy_norm": pos_pts,
+        "negative_points_xy_norm": neg_pts,
+        "box_xyxy": box_xyxy,
+        "point_coords": pos_px + neg_px,
+        "point_labels": [1] * len(pos_px) + [0] * len(neg_px),
+    }
+
+
+def _force_level_to_gripper_config_str(force_level: str) -> dict:
+    mapping = {
+        "very_low": {"close_gripper_position": 0.0, "close_gripper_force": 0.8, "close_gripper_velocity": 0.03},
+        "low":      {"close_gripper_position": 0.0, "close_gripper_force": 1.0, "close_gripper_velocity": 0.04},
+        "medium":   {"close_gripper_position": 0.0, "close_gripper_force": 1.5, "close_gripper_velocity": 0.05},
+        "high":     {"close_gripper_position": 0.0, "close_gripper_force": 2.0, "close_gripper_velocity": 0.06},
+    }
+    return dict(mapping.get(force_level, mapping["low"]))
 
 
 class VlmSam2PromptNode(Node):
@@ -644,10 +704,23 @@ class VlmSam2PromptNode(Node):
             self._handle_set_instruction,
         )
 
+        self.declare_parameter("select_next_service", "/vlm_prompt/select_next_object")
+        self.declare_parameter("reset_handled_service", "/vlm_prompt/reset_handled_objects")
+
+        select_next_service = self.get_parameter("select_next_service").value
+        reset_handled_service = self.get_parameter("reset_handled_service").value
+
+        self.already_handled = []
+        self.already_handled_lock = threading.Lock()
+
+        self.create_service(Trigger, select_next_service, self._handle_select_next_object)
+        self.create_service(Trigger, reset_handled_service, self._handle_reset_handled_objects)
+
         self.get_logger().info(
             f"VLM listo. imagen='{image_topic}', "
             f"prompt='{prompt_topic}', gripper='{gripper_config_topic}', "
-            f"servicio='{select_service}', instruccion='{set_instruction_service}', "
+            f"servicio='{select_service}', select_next='{select_next_service}', "
+            f"instruccion='{set_instruction_service}', "
             f"servidor_vlm='{self.get_parameter('vlm_server_url').value}'."
         )
 
@@ -794,6 +867,112 @@ class VlmSam2PromptNode(Node):
         except Exception as exc:
             response.success = False
             response.message = f"Error en pipeline VLM/SAM2: {exc}"
+            self.get_logger().error(response.message)
+            return response
+
+
+    def _handle_reset_handled_objects(self, request, response):
+        del request
+        with self.already_handled_lock:
+            self.already_handled = []
+        response.success = True
+        response.message = "Lista de objetos manejados reiniciada."
+        self.get_logger().info(response.message)
+        return response
+
+    def _handle_select_next_object(self, request, response):
+        del request
+
+        with self.lock:
+            image = self.latest_image.copy() if self.latest_image is not None else None
+            instruction = self.current_instruction
+        with self.already_handled_lock:
+            already_handled = list(self.already_handled)
+
+        if image is None:
+            response.success = False
+            response.message = "No hay imagen RGB disponible todavia."
+            self.get_logger().error(response.message)
+            return response
+
+        output_dir = Path(self.get_parameter("output_dir").value)
+        save_debug_outputs = bool(self.get_parameter("save_debug_outputs").value)
+        shared_filename = str(self.get_parameter("shared_image_filename").value)
+        vlm_timeout = float(self.get_parameter("vlm_request_timeout_sec").value)
+        vlm_server_url = str(self.get_parameter("vlm_server_url").value)
+        base_url = vlm_server_url.rsplit("/", 1)[0]
+        select_next_url = f"{base_url}/select_next_object"
+
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            image_path = output_dir / shared_filename
+            image.save(str(image_path))
+            self.get_logger().info(
+                f"select_next_object -> {select_next_url} | ya_manejados={already_handled}"
+            )
+
+            with open(image_path, "rb") as img_file:
+                resp = requests.post(
+                    select_next_url,
+                    files={"image": (shared_filename, img_file, "image/jpeg")},
+                    data={
+                        "instruction": instruction,
+                        "already_handled": json.dumps(already_handled, ensure_ascii=False),
+                    },
+                    timeout=vlm_timeout,
+                )
+            resp.raise_for_status()
+            data = resp.json()
+
+            if save_debug_outputs:
+                debug_path = output_dir / "select_next_raw_response.json"
+                debug_path.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+
+            if not data.get("success"):
+                raise RuntimeError(data.get("error") or "select_next_object success=false")
+
+            result = data.get("result", {})
+
+            if result.get("done") or not result.get("visible", False):
+                response.success = False
+                response.message = "mesa limpia"
+                self.get_logger().info("VLM select_next_object: mesa limpia (done=true o sin objeto visible).")
+                return response
+
+            payload = _build_sam2_payload_from_selection(image, result)
+            payload_path = output_dir / "sam2_vlm_prompt.json"
+            with open(payload_path, "w", encoding="utf-8") as pf:
+                json.dump(payload, pf, indent=2, ensure_ascii=False)
+
+            force_level = result.get("force_level", "low")
+            gripper_config = _force_level_to_gripper_config_str(force_level)
+            gripper_config_path = output_dir / "gripper_config_from_vlm.json"
+            with open(gripper_config_path, "w", encoding="utf-8") as gf:
+                json.dump(gripper_config, gf, indent=2, ensure_ascii=False)
+            gripper_msg = String()
+            gripper_msg.data = json.dumps(gripper_config, ensure_ascii=False)
+            self.gripper_config_pub.publish(gripper_msg)
+
+            obj_name = result.get("object", "")
+            if obj_name:
+                with self.already_handled_lock:
+                    if obj_name not in self.already_handled:
+                        self.already_handled.append(obj_name)
+
+            response.success = True
+            response.message = obj_name
+            self.get_logger().info(
+                f"select_next_object: objeto='{obj_name}', "
+                f"parte='{result.get('selected_safe_part', '')}', "
+                f"confidence={result.get('confidence', 0.0)}"
+            )
+            return response
+
+        except Exception as exc:
+            response.success = False
+            response.message = f"Error en select_next_object: {exc}"
             self.get_logger().error(response.message)
             return response
 

@@ -1,0 +1,13 @@
+string selected_skill
+string object_name
+string target_location
+string vlm_context_json
+int32 attempt_number
+---
+bool success
+string executed_skill
+string service_name
+string stage
+string failure_type
+string message
+string detail_json

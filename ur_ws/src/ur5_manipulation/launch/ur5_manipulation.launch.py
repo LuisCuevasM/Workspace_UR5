@@ -36,9 +36,12 @@ def generate_launch_description():
     bt_ready_services = LaunchConfiguration("bt_ready_services")
     bt_settle_delay = LaunchConfiguration("bt_settle_delay")
     enable_vlm_prompt = LaunchConfiguration("enable_vlm_prompt")
+    enable_instruction_query = LaunchConfiguration("enable_instruction_query")
     vlm_instruction = LaunchConfiguration("vlm_instruction")
     vlm_server_url = LaunchConfiguration("vlm_server_url")
     vlm_request_timeout_sec = LaunchConfiguration("vlm_request_timeout_sec")
+    query_vlm_base_url = LaunchConfiguration("query_vlm_base_url")
+    query_vlm_request_timeout_sec = LaunchConfiguration("query_vlm_request_timeout_sec")
     sam_apply_timeout_sec = LaunchConfiguration("sam_apply_timeout_sec")
     sam_select_service_name = LaunchConfiguration("sam_select_service_name")
 
@@ -115,6 +118,22 @@ def generate_launch_description():
             }
         ],
         condition=IfCondition(enable_vlm_prompt),
+    )
+
+    vlm_instruction_query_node = Node(
+        package="ur5_manipulation",
+        executable="vlm_instruction_query_node.py",
+        name="vlm_instruction_query_node",
+        output="screen",
+        parameters=[
+            {
+                "service_name": "/ur5/query_instruction",
+                "image_topic": "/camera/camera/color/image_raw",
+                "vlm_base_url": query_vlm_base_url,
+                "vlm_request_timeout_sec": query_vlm_request_timeout_sec,
+            }
+        ],
+        condition=IfCondition(enable_instruction_query),
     )
 
     point_cloud_scanner = IncludeLaunchDescription(
@@ -219,7 +238,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "bt_ready_services",
-                default_value="/ur5/go_home,/ur5/run_bt_grasp_cycle,/ur5/clear_grasp_cache,/graspgen/run_inference,/graspgen/run_inference_sam,/ur5/gripper/open,/ur5/gripper/close",
+                default_value="/ur5/go_home,/ur5/run_bt_grasp_cycle,/ur5/clean_table,/ur5/clear_grasp_cache,/graspgen/run_inference,/graspgen/run_inference_sam,/ur5/gripper/open,/ur5/gripper/close",
                 description="Comma-separated services that indicate the BT grasp stack is ready.",
             ),
             DeclareLaunchArgument(
@@ -233,19 +252,34 @@ def generate_launch_description():
                 description="Start the VLM prompt node that sends semantic prompts to SAM2.",
             ),
             DeclareLaunchArgument(
+                "enable_instruction_query",
+                default_value="true",
+                description="Start the VLM instruction query service /ur5/query_instruction.",
+            ),
+            DeclareLaunchArgument(
                 "vlm_instruction",
                 default_value="Selecciona el objeto solicitado para agarrarlo.",
                 description="Instruction used by the VLM when the BT asks SAM2 to select an object.",
             ),
             DeclareLaunchArgument(
                 "vlm_server_url",
-                default_value="http://172.17.0.2:8888/infer_image",
+                default_value="http://192.168.1.110:8888/infer_image",
                 description="HTTP endpoint used by the VLM prompt node.",
             ),
             DeclareLaunchArgument(
                 "vlm_request_timeout_sec",
                 default_value="180.0",
                 description="Maximum seconds to wait for the VLM HTTP inference response.",
+            ),
+            DeclareLaunchArgument(
+                "query_vlm_base_url",
+                default_value="http://192.168.1.110:8888",
+                description="HTTP base URL used by /ur5/query_instruction.",
+            ),
+            DeclareLaunchArgument(
+                "query_vlm_request_timeout_sec",
+                default_value="180.0",
+                description="Maximum seconds to wait for /ur5/query_instruction VLM response.",
             ),
             DeclareLaunchArgument(
                 "sam_apply_timeout_sec",
@@ -260,6 +294,7 @@ def generate_launch_description():
             ),
             driver,
             vlm_prompt_node,
+            vlm_instruction_query_node,
             wait_for_driver,
             RegisterEventHandler(
                 OnProcessExit(

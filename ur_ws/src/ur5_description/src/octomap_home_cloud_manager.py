@@ -39,7 +39,7 @@ class OctomapHomeCloudManager(Node):
             "capture_service_name", "/octomap_home_cloud_manager/capture_home_cloud"
         ).value
         self.home_joint_tolerance = float(
-            self.declare_parameter("home_joint_tolerance", 0.08).value
+            self.declare_parameter("home_joint_tolerance", 0.08).value  # BT deberia manejar cuando este nodo carga o descarga el nuevo pc para octomap
         )
         self.publish_rate_hz = float(
             self.declare_parameter("publish_rate_hz", 2.0).value

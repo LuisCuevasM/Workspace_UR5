@@ -1,0 +1,9 @@
+string instruction
+---
+bool success
+string selected_skill
+string object_name
+string target_location
+string vlm_context_json
+string message
+string raw_response_json

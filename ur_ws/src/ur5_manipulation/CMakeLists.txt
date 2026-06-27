@@ -8,17 +8,22 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetVlmInstruction.srv"
   "srv/GetCameraImage.srv"
   "srv/Perceive.srv"
+  "srv/QueryInstruction.srv"
+  "srv/DecodeSkill.srv"
+  "srv/ExecuteInstruction.srv"
   "srv/RunSkill.srv"
 )
 
 install(PROGRAMS
   scripts/VLM_prompt.py
   scripts/wait_for_services.py
-  scripts/e2e_grasp_test.py
+  scripts/test_pick_place.py
   src/detection_grasp.py
   src/grasp_sensor.py
   src/robot_perception_node.py
   src/robot_skill_node.py
+  src/skill_decoder_node.py
+  src/vlm_instruction_query_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

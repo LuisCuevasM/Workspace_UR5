@@ -18,6 +18,14 @@ from std_srvs.srv import Trigger
 from std_srvs.srv import Empty
 
 
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 class BTStatus(Enum):
     SUCCESS = auto()
     FAILURE = auto()
@@ -185,6 +193,12 @@ class BTGraspCoordinator(Node):
         self.execute_cached_cycle_service_name = self.declare_parameter(
             "execute_cached_cycle_service_name", "/ur5/execute_cached_grasp_cycle"
         ).value
+        self.execute_pick_service_name = self.declare_parameter(
+            "execute_pick_service_name", "/ur5/execute_pick"
+        ).value
+        self.execute_place_service_name = self.declare_parameter(
+            "execute_place_service_name", "/ur5/execute_place"
+        ).value
         self.clear_grasp_cache_service_name = self.declare_parameter(
             "clear_grasp_cache_service_name", "/ur5/clear_grasp_cache"
         ).value
@@ -194,12 +208,32 @@ class BTGraspCoordinator(Node):
         self.prepare_bt_service_name = self.declare_parameter(
             "prepare_bt_service_name", "/ur5/prepare_bt_grasp_cycle"
         ).value
+        self.prepare_context_bt_service_name = self.declare_parameter(
+            "prepare_context_bt_service_name", "/ur5/prepare_context_bt_grasp_cycle"
+        ).value
         self.execute_bt_service_name = self.declare_parameter(
             "execute_bt_service_name", "/ur5/execute_bt_grasp_cycle"
         ).value
         self.bt_service_name = self.declare_parameter(
             "bt_service_name", "/ur5/run_bt_grasp_cycle"
         ).value
+        self.clean_table_service_name = self.declare_parameter(
+            "clean_table_service_name", "/ur5/clean_table"
+        ).value
+        self.clean_table_max_cycles = int(
+            self.declare_parameter("clean_table_max_cycles", 20).value
+        )
+        self.clean_table_use_vlm = _as_bool(
+            self.declare_parameter("clean_table_use_vlm", False).value
+        )
+        self.clean_table_scan_on_no_grasps = _as_bool(
+            self.declare_parameter("clean_table_scan_on_no_grasps", True).value
+        )
+        self.clean_table_treat_selection_failure_as_done = _as_bool(
+            self.declare_parameter(
+                "clean_table_treat_selection_failure_as_done", True
+            ).value
+        )
         self.scan_prepare_bt_service_name = self.declare_parameter(
             "scan_prepare_bt_service_name", "/ur5/prepare_scan_bt_grasp_cycle"
         ).value
@@ -207,13 +241,19 @@ class BTGraspCoordinator(Node):
             "capture_scan_service_name", "/point_cloud_scanner/capture_scan"
         ).value
         self.vlm_health_url = self.declare_parameter(
-            "vlm_health_url", "http://172.17.0.2:8888/health"
+            "vlm_health_url", "http://192.168.1.110:8888/health"
         ).value
         self.vlm_release_url = self.declare_parameter(
-            "vlm_release_url", "http://172.17.0.2:8888/release"
+            "vlm_release_url", "http://192.168.1.110:8888/release"
         ).value
         self.vlm_select_service_name = self.declare_parameter(
             "vlm_select_service_name", "/vlm_prompt/select_object"
+        ).value
+        self.vlm_select_next_service_name = self.declare_parameter(
+            "vlm_select_next_service_name", "/vlm_prompt/select_next_object"
+        ).value
+        self.vlm_reset_handled_service_name = self.declare_parameter(
+            "vlm_reset_handled_service_name", "/vlm_prompt/reset_handled_objects"
         ).value
         self.vlm_health_timeout_sec = float(
             self.declare_parameter("vlm_health_timeout_sec", 60.0).value
@@ -246,6 +286,9 @@ class BTGraspCoordinator(Node):
             "top_grasps_topic", "/graspgen/top_grasps"
         ).value
         self.max_retries = int(self.declare_parameter("max_retries", 3).value)
+        self.sam_selection_retries = int(
+            self.declare_parameter("sam_selection_retries", 3).value
+        )
         self.grasp_wait_timeout_sec = float(
             self.declare_parameter("grasp_wait_timeout_sec", 20.0).value
         )
@@ -294,6 +337,8 @@ class BTGraspCoordinator(Node):
         self.planning_ready = False
         self.planning_summary = "Sin planificacion preparada"
         self.last_failure_reason = "Sin fallo registrado"
+        self.last_failure_type = ""
+        self.last_failure_stage = ""
         self.last_cached_execution_message = "Sin ejecucion cacheada"
         self.selection_done_for_cycle = False
 
@@ -347,6 +392,16 @@ class BTGraspCoordinator(Node):
             self.execute_cached_cycle_service_name,
             callback_group=self.cb_group,
         )
+        self.execute_pick_client = self.create_client(
+            Trigger,
+            self.execute_pick_service_name,
+            callback_group=self.cb_group,
+        )
+        self.execute_place_client = self.create_client(
+            Trigger,
+            self.execute_place_service_name,
+            callback_group=self.cb_group,
+        )
         self.clear_grasp_cache_client = self.create_client(
             Trigger,
             self.clear_grasp_cache_service_name,
@@ -365,6 +420,16 @@ class BTGraspCoordinator(Node):
         self.vlm_select_client = self.create_client(
             Trigger,
             self.vlm_select_service_name,
+            callback_group=self.cb_group,
+        )
+        self.vlm_select_next_client = self.create_client(
+            Trigger,
+            self.vlm_select_next_service_name,
+            callback_group=self.cb_group,
+        )
+        self.vlm_reset_handled_client = self.create_client(
+            Trigger,
+            self.vlm_reset_handled_service_name,
             callback_group=self.cb_group,
         )
         self.sam_release_client = self.create_client(
@@ -421,6 +486,12 @@ class BTGraspCoordinator(Node):
             self._handle_prepare_bt_cycle,
             callback_group=self.cb_group,
         )
+        self.prepare_context_bt_service = self.create_service(
+            Trigger,
+            self.prepare_context_bt_service_name,
+            self._handle_context_prepare_bt_cycle,
+            callback_group=self.cb_group,
+        )
         self.execute_bt_service = self.create_service(
             Trigger,
             self.execute_bt_service_name,
@@ -431,6 +502,12 @@ class BTGraspCoordinator(Node):
             Trigger,
             self.bt_service_name,
             self._handle_run_bt_cycle,
+            callback_group=self.cb_group,
+        )
+        self.clean_table_service = self.create_service(
+            Trigger,
+            self.clean_table_service_name,
+            self._handle_clean_table,
             callback_group=self.cb_group,
         )
         self.scan_prepare_bt_service = self.create_service(
@@ -455,6 +532,7 @@ class BTGraspCoordinator(Node):
         self.get_logger().info(
             "BT coordinator listo "
             f"(prepare='{self.prepare_bt_service_name}', "
+            f"prepare_context='{self.prepare_context_bt_service_name}', "
             f"prepare_scan='{self.scan_prepare_bt_service_name}', "
             f"prepare_vlm='{self.prepare_vlm_bt_service_name}', "
             f"prepare_scan_vlm='{self.scan_prepare_vlm_bt_service_name}', "
@@ -471,7 +549,10 @@ class BTGraspCoordinator(Node):
             f"grasp_sam='{self.grasp_sam_service_name}', "
             f"grasp_scan='{self.grasp_service_name}', "
             f"capture_scan='{self.capture_scan_service_name}', "
-            f"execute_cached='{self.execute_cached_cycle_service_name}')."
+            f"execute_cached='{self.execute_cached_cycle_service_name}', "
+            f"execute_pick='{self.execute_pick_service_name}', "
+            f"execute_place='{self.execute_place_service_name}', "
+            f"clean_table='{self.clean_table_service_name}')."
         )
 
     def _wait_for_future_result(self, future, timeout_sec: float):
@@ -559,12 +640,16 @@ class BTGraspCoordinator(Node):
 
     def _set_failure(self, failure_type: str, stage: str, reason: str):
         self.last_failure_reason = reason
+        self.last_failure_type = failure_type
+        self.last_failure_stage = stage
         self._failure_published_this_cycle = True
         self._publish_skill_failure(failure_type, stage, reason)
 
     def _clear_failure(self):
         """Marca inicio de un ciclo limpio (sin fallo) y lo publica."""
         self._failure_published_this_cycle = False
+        self.last_failure_type = ""
+        self.last_failure_stage = ""
         self._publish_skill_failure("", "", "preparacion en curso")
 
     def _call_trigger(self, client, service_name: str, timeout_sec: float, label: str):
@@ -759,6 +844,14 @@ class BTGraspCoordinator(Node):
         )
         return ok
 
+    def _build_sam_selection_retry_node(self) -> BTNode:
+        return RetryNode(
+            "RetrySAMSelection",
+            OneShotActionNode("CallSAM", self._call_sam_selection),
+            max_attempts=self.sam_selection_retries,
+            logger=self.get_logger(),
+        )
+
     def _build_scan_prepare_tree(self) -> BTNode:
         """Arbol de preparacion con scanner 3D.
 
@@ -775,7 +868,7 @@ class BTGraspCoordinator(Node):
                 OneShotActionNode("EnsureHome", self._ensure_home),
                 ConditionNode("RobotAtHome", self._is_in_home),
                 OneShotActionNode("ClearPreviousGrasps", self._clear_grasp_cache_for_selection),
-                OneShotActionNode("CallSAM", self._call_sam_selection),
+                self._build_sam_selection_retry_node(),
                 OneShotActionNode("OctoHomeCloud", self._capture_octomap_home_cloud),
                 OneShotActionNode("ClearOctomap", self._clear_octomap),
                 OneShotActionNode("CallCaptureScanner", self._call_capture_scan),
@@ -806,7 +899,7 @@ class BTGraspCoordinator(Node):
                 OneShotActionNode("EnsureHome", self._ensure_home),
                 ConditionNode("RobotAtHome", self._is_in_home),
                 OneShotActionNode("ClearPreviousGrasps", self._clear_grasp_cache_for_selection),
-                OneShotActionNode("CallSAM", self._call_sam_selection),
+                self._build_sam_selection_retry_node(),
                 OneShotActionNode("OctoHomeCloud", self._capture_octomap_home_cloud),
                 OneShotActionNode("ClearOctomap", self._clear_octomap),
                 RetryNode(
@@ -816,6 +909,37 @@ class BTGraspCoordinator(Node):
                     logger=self.get_logger(),
                 ),
                 
+            ],
+        )
+
+    def _build_context_prepare_tree(self) -> BTNode:
+        planning_attempt_sequence = SequenceNode(
+            "ContextGraspPlanningSequence",
+            [
+                OneShotActionNode("CallGraspGen", self._call_grasp_generation),
+                WaitForGraspsNode(
+                    "WaitForFreshGrasps",
+                    self._has_fresh_grasps,
+                    lambda: self.grasp_wait_timeout_sec,
+                ),
+            ],
+        )
+        return SequenceNode(
+            "RootContextPrepareTree",
+            [
+                ConditionNode("JointStatesReady", self._has_valid_joint_state),
+                OneShotActionNode("EnsureHome", self._ensure_home),
+                ConditionNode("RobotAtHome", self._is_in_home),
+                OneShotActionNode("ClearPreviousGrasps", self._clear_grasp_cache_for_selection),
+                OneShotActionNode("ApplySamVlmPrompt", self._apply_sam_vlm_prompt),
+                OneShotActionNode("OctoHomeCloud", self._capture_octomap_home_cloud),
+                OneShotActionNode("ClearOctomap", self._clear_octomap),
+                RetryNode(
+                    "RetryPlanning",
+                    planning_attempt_sequence,
+                    max_attempts=self.max_retries,
+                    logger=self.get_logger(),
+                ),
             ],
         )
 
@@ -872,6 +996,43 @@ class BTGraspCoordinator(Node):
             root.reset()
             self.workflow_active = False
 
+    def _handle_context_prepare_bt_cycle(self, request, response):
+        del request
+
+        if self.workflow_active:
+            response.success = False
+            response.message = "Ya hay una accion BT en ejecucion"
+            return response
+
+        self.workflow_active = True
+        root = self._build_context_prepare_tree()
+        try:
+            self.planning_ready = False
+            self.selection_done_for_cycle = False
+            ok = self._run_tree_until_done(
+                root, "BT: iniciando preparacion desde contexto VLM ya resuelto."
+            )
+            if ok:
+                self.planning_ready = True
+                self.selection_done_for_cycle = True
+                self.planning_summary = (
+                    "Preparacion desde contexto completada: SAM2 aplicado "
+                    "y grasps frescos disponibles"
+                )
+                response.success = True
+                response.message = self.planning_summary
+            else:
+                self.planning_ready = False
+                self.planning_summary = (
+                    f"BT fallo durante la preparacion desde contexto: {self.last_failure_reason}"
+                )
+                response.success = False
+                response.message = self.planning_summary
+            return response
+        finally:
+            root.reset()
+            self.workflow_active = False
+
     def _handle_scan_prepare_bt_cycle(self, request, response):
         del request
 
@@ -919,7 +1080,7 @@ class BTGraspCoordinator(Node):
             response.success = False
             response.message = (
                 "No hay una preparacion lista. Primero llama a prepare_bt_grasp_cycle "
-                "o prepare_scan_bt_grasp_cycle."
+                "prepare_context_bt_grasp_cycle o prepare_scan_bt_grasp_cycle."
             )
             return response
 
@@ -971,6 +1132,211 @@ class BTGraspCoordinator(Node):
         response.success = execute_response.success
         response.message = execute_response.message
         return response
+
+    def _prepare_clean_table_object(self, use_scan: bool) -> bool:
+        if use_scan:
+            root = (
+                self._build_scan_vlm_select_next_prepare_tree()
+                if self.clean_table_use_vlm
+                else self._build_scan_prepare_tree()
+            )
+            label = (
+                "BT Limpiar la Mesa: preparando objeto con scanner."
+                if not self.clean_table_use_vlm
+                else "BT Limpiar la Mesa: preparando objeto con VLM select_next + scanner."
+            )
+        else:
+            root = (
+                self._build_vlm_select_next_prepare_tree()
+                if self.clean_table_use_vlm
+                else self._build_prepare_tree()
+            )
+            label = (
+                "BT Limpiar la Mesa: preparando objeto."
+                if not self.clean_table_use_vlm
+                else "BT Limpiar la Mesa: preparando objeto con VLM select_next."
+            )
+
+        try:
+            self.planning_ready = False
+            self.selection_done_for_cycle = False
+            ok = self._run_tree_until_done(root, label)
+            self.planning_ready = ok
+            return ok
+        finally:
+            root.reset()
+
+    def _execute_pick_for_clean_table(self) -> bool:
+        ok, _ = self._call_trigger(
+            self.execute_pick_client,
+            self.execute_pick_service_name,
+            timeout_sec=self.execution_timeout_sec,
+            label="pick de Limpiar la Mesa",
+        )
+        if not ok and not self._failure_published_this_cycle:
+            self._set_failure("execution_failed", "execution", self.last_failure_reason)
+        return ok
+
+    def _execute_place_for_clean_table(self) -> bool:
+        ok, _ = self._call_trigger(
+            self.execute_place_client,
+            self.execute_place_service_name,
+            timeout_sec=self.execution_timeout_sec,
+            label="place de Limpiar la Mesa",
+        )
+        if not ok and not self._failure_published_this_cycle:
+            self._set_failure("place_failed", "place", self.last_failure_reason)
+        return ok
+
+    def _go_home_after_clean_table_step(self, reason: str) -> bool:
+        ok, _ = self._call_trigger(
+            self.go_home_client,
+            self.go_home_service_name,
+            timeout_sec=90.0,
+            label=reason,
+        )
+        if not ok:
+            self.get_logger().warn(
+                f"BT Limpiar la Mesa: no se pudo retornar a HOME tras {reason}."
+            )
+        return ok
+
+    def _clean_table_selection_means_done(self) -> bool:
+        if self.last_failure_stage not in ("perception", "segmentation"):
+            return False
+
+        reason = (self.last_failure_reason or "").lower()
+        no_object_markers = (
+            "sin objeto",
+            "sin objetos",
+            "no hay objeto",
+            "no hay objetos",
+            "no object",
+            "no objects",
+            "object_not_found",
+            "objeto no encontrado",
+            "no se detect",
+            "mesa limpia",
+            "table clean",
+        )
+        if any(marker in reason for marker in no_object_markers):
+            return True
+
+        if self.clean_table_treat_selection_failure_as_done:
+            hard_failure_markers = (
+                "servicio",
+                "service",
+                "timeout",
+                "exception",
+                "traceback",
+                "cuda",
+                "oom",
+                "vrAM".lower(),
+            )
+            return not any(marker in reason for marker in hard_failure_markers)
+
+        return False
+
+    def _handle_clean_table(self, request, response):
+        del request
+
+        if self.workflow_active:
+            response.success = False
+            response.message = "Ya hay una accion BT en ejecucion"
+            return response
+
+        self.workflow_active = True
+        cleaned_count = 0
+        discarded_count = 0
+        try:
+            if self.clean_table_use_vlm:
+                self._reset_vlm_handled_objects()
+
+            self.get_logger().info(
+                "BT Limpiar la Mesa: iniciando ciclo iterativo "
+                f"(max_cycles={self.clean_table_max_cycles}, "
+                f"use_vlm={self.clean_table_use_vlm}, "
+                f"scan_on_no_grasps={self.clean_table_scan_on_no_grasps})."
+            )
+
+            for cycle_index in range(1, self.clean_table_max_cycles + 1):
+                self.get_logger().info(
+                    f"BT Limpiar la Mesa: ciclo {cycle_index}/"
+                    f"{self.clean_table_max_cycles}."
+                )
+
+                if not self._prepare_clean_table_object(use_scan=False):
+                    if self._clean_table_selection_means_done():
+                        response.success = True
+                        response.message = (
+                            "Mesa limpia: no se detectaron mas objetos "
+                            f"(retirados={cleaned_count}, descartados={discarded_count})."
+                        )
+                        return response
+
+                    if (
+                        self.clean_table_scan_on_no_grasps
+                        and self.last_failure_type == "no_grasps_generated"
+                    ):
+                        self.get_logger().warn(
+                            "BT Limpiar la Mesa: no hubo grasps; intentando scanner."
+                        )
+                        if not self._prepare_clean_table_object(use_scan=True):
+                            if self.last_failure_type == "no_grasps_generated":
+                                discarded_count += 1
+                                self.get_logger().warn(
+                                    "BT Limpiar la Mesa: objeto descartado tras "
+                                    "fallar generacion de grasps con scanner."
+                                )
+                                self._go_home_after_clean_table_step(
+                                    "descarte de objeto sin grasps"
+                                )
+                                continue
+                            response.success = False
+                            response.message = (
+                                "BT Limpiar la Mesa fallo durante preparacion "
+                                f"con scanner: {self.last_failure_reason}"
+                            )
+                            return response
+                    else:
+                        response.success = False
+                        response.message = (
+                            "BT Limpiar la Mesa fallo durante preparacion: "
+                            f"{self.last_failure_reason}"
+                        )
+                        return response
+
+                if not self._execute_pick_for_clean_table():
+                    self.get_logger().warn(
+                        "BT Limpiar la Mesa: pick fallo; retornando a HOME y "
+                        "reiniciando ciclo."
+                    )
+                    self._go_home_after_clean_table_step("fallo de pick")
+                    continue
+
+                if not self._execute_place_for_clean_table():
+                    self._go_home_after_clean_table_step("fallo de place")
+                    response.success = False
+                    response.message = (
+                        "BT Limpiar la Mesa fallo durante place: "
+                        f"{self.last_failure_reason}"
+                    )
+                    return response
+
+                cleaned_count += 1
+                self._go_home_after_clean_table_step("place completado")
+
+            response.success = False
+            response.message = (
+                "BT Limpiar la Mesa alcanzo el maximo de ciclos sin confirmar "
+                f"mesa limpia (retirados={cleaned_count}, "
+                f"descartados={discarded_count}, max_cycles={self.clean_table_max_cycles})."
+            )
+            return response
+        finally:
+            self.planning_ready = False
+            self.selection_done_for_cycle = False
+            self.workflow_active = False
 
 
     # ------------------------------------------------------------------
@@ -1036,117 +1402,13 @@ class BTGraspCoordinator(Node):
         return False
 
     def _release_vlm(self) -> bool:
-        """Pide al servidor Flask liberar la memoria GPU del modelo VLM.
-
-        Devuelve True si /release respondió ok; ante cualquier fallo loggea
-        un warning y devuelve False sin abortar el ciclo.
-        """
-        self.get_logger().info("BT: solicitando liberacion de memoria VLM via HTTP")
-        try:
-            req = urllib.request.Request(
-                self.vlm_release_url,
-                data=b"",  # POST sin cuerpo
-                method="POST",
-            )
-            with urllib.request.urlopen(
-                req, timeout=self.vlm_release_timeout_sec
-            ) as resp:
-                data = json.loads(resp.read().decode())
-            if resp.status == 200 and data.get("success"):
-                self.get_logger().info("BT: release VLM completado")
-                return True
-            self.get_logger().warn(
-                f"BT: warning release VLM fallo: respuesta inesperada {data}"
-            )
-            return False
-        except Exception as exc:
-            self.get_logger().warn(f"BT: warning release VLM fallo: {exc}")
-            return False
+        return True
 
     def _wait_vlm_vram_released(self) -> bool:
-        """Espera a que el VLM libere suficiente VRAM para cargar SAM2.
-
-        Combina dos fuentes:
-        1. /health del servidor Gemma (model_loaded y cuda_allocated_gb) para
-           confirmar que PyTorch libero sus tensores dentro del contenedor.
-        2. nvidia-smi desde el host, que reporta la memoria realmente libre en
-           el dispositivo. El contexto CUDA del contenedor Docker puede retener
-           gigabytes que PyTorch ya no cuenta — esta es la causa habitual del
-           CUDA OOM en SAM2 aunque /health diga cuda_allocated_gb≈0.
-
-        Devuelve True solo cuando AMBAS condiciones se satisfacen.
-        """
-        self.get_logger().info(
-            f"BT: esperando que el VLM libere VRAM "
-            f"(necesario >= {self.vlm_min_free_vram_gb:.1f} GB libres en GPU)"
-        )
-        deadline = time.monotonic() + self.vlm_release_settle_timeout_sec
-        last_loaded = None
-        last_alloc = None
-        last_free_gb = 0.0
-
-        while time.monotonic() < deadline:
-            # Fuente 1: reporte interno del servidor VLM.
-            model_unloaded = True
-            try:
-                req = urllib.request.Request(self.vlm_health_url)
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    data = json.loads(resp.read().decode())
-                last_loaded = data.get("model_loaded")
-                last_alloc = data.get("cuda_allocated_gb")
-                model_unloaded = last_loaded is not True and (
-                    last_alloc is None
-                    or float(last_alloc) <= self.vlm_release_free_gb_threshold
-                )
-            except Exception:
-                pass
-
-            # Fuente 2: memoria libre real en el dispositivo (host, no Docker).
-            last_free_gb = self._get_gpu_free_gb()
-            gpu_has_room = last_free_gb >= self.vlm_min_free_vram_gb
-
-            if model_unloaded and gpu_has_room:
-                self.get_logger().info(
-                    f"BT: VRAM liberada — model_loaded={last_loaded}, "
-                    f"cuda_allocated_gb={last_alloc}, "
-                    f"gpu_free={last_free_gb:.2f} GB"
-                )
-                return True
-
-            time.sleep(0.5)
-
-        self.get_logger().error(
-            f"BT: el VLM NO libero suficiente VRAM tras "
-            f"{self.vlm_release_settle_timeout_sec}s "
-            f"(model_loaded={last_loaded}, cuda_allocated_gb={last_alloc}, "
-            f"gpu_free={last_free_gb:.2f} GB, requerido={self.vlm_min_free_vram_gb:.1f} GB). "
-            "El contexto CUDA del contenedor Docker puede estar reteniendo memoria. "
-            "Considera reiniciar el contenedor VLM o aumentar vlm_release_settle_timeout_sec."
-        )
-        return False
+        return True
 
     def _release_perception_models(self):
-        """Descarga SAM2 y GraspGen de la GPU para dejar VRAM libre al VLM.
-
-        Los fallos solo generan warning: el modelo puede no estar cargado o el
-        servicio no disponible, y no debe abortar el ciclo VLM por ello.
-        """
-        self.get_logger().info("BT: liberando VRAM de SAM2 y GraspGen antes del VLM")
-        for client, name in (
-            (self.sam_release_client, self.sam_release_service_name),
-            (self.graspgen_release_client, self.graspgen_release_service_name),
-        ):
-            ok, msg = self._call_trigger(
-                client, name, timeout_sec=30.0, label="release de modelo"
-            )
-            if not ok:
-                self.get_logger().warn(
-                    f"BT: warning release '{name}' fallo (continuando): {msg}"
-                )
-
-        # Dar tiempo a CUDA para liberar la memoria antes de cargar Gemma.
-        if self.vlm_model_swap_wait_sec > 0.0:
-            time.sleep(self.vlm_model_swap_wait_sec)
+        pass
 
     def _load_sam_model(self) -> bool:
         self.get_logger().info("BT: recargando modelo SAM2 tras el VLM")
@@ -1236,6 +1498,75 @@ class BTGraspCoordinator(Node):
         self.get_logger().info("Continuing with SAM2/GraspGen")
         return True
 
+    def _reset_vlm_handled_objects(self) -> bool:
+        ok, _ = self._call_trigger(
+            self.vlm_reset_handled_client,
+            self.vlm_reset_handled_service_name,
+            timeout_sec=5.0,
+            label="reset objetos VLM manejados",
+        )
+        return ok
+
+    def _call_vlm_select_next_with_lifecycle(self) -> bool:
+        if self.selection_done_for_cycle:
+            self.get_logger().info(
+                "BT: la seleccion VLM-next ya fue realizada en este ciclo."
+            )
+            return True
+
+        self._release_perception_models()
+
+        # Esperar a que SAM2/GraspGen liberen la VRAM antes de cargar el VLM.
+        if not self._wait_vlm_vram_released():
+            self._set_failure(
+                "segmentation_failed",
+                "segmentation",
+                "SAM2/GraspGen no liberaron suficiente VRAM para cargar VLM",
+            )
+            return False
+
+        if not self._wait_vlm_health():
+            return False
+
+        ok = False
+        msg = ""
+        try:
+            self.get_logger().info(
+                "BT: llamando select_next_object via /vlm_prompt/select_next_object"
+            )
+            ok, msg = self._call_trigger(
+                self.vlm_select_next_client,
+                self.vlm_select_next_service_name,
+                timeout_sec=120.0,
+                label="seleccion VLM siguiente objeto",
+            )
+        finally:
+            self._release_vlm()
+
+        if not ok:
+            low = (msg or "").lower()
+            if "mesa limpia" in low or "table clean" in low or "done" in low:
+                self._set_failure("segmentation_failed", "segmentation", "mesa limpia")
+            return False
+
+        if not self._wait_vlm_vram_released():
+            self._set_failure(
+                "segmentation_failed",
+                "segmentation",
+                "VLM no libero suficiente VRAM; SAM2 no puede cargarse sin CUDA OOM",
+            )
+            return False
+
+        if not self._load_sam_model():
+            return False
+
+        if not self._apply_sam_vlm_prompt():
+            return False
+
+        self.selection_done_for_cycle = True
+        self.get_logger().info("BT: select_next_object completado, continuando con SAM2/GraspGen")
+        return True
+
     # ------------------------------------------------------------------
     # VLM prepare trees
     # ------------------------------------------------------------------
@@ -1280,6 +1611,58 @@ class BTGraspCoordinator(Node):
                 ConditionNode("RobotAtHome", self._is_in_home),
                 OneShotActionNode("ClearPreviousGrasps", self._clear_grasp_cache_for_selection),
                 OneShotActionNode("CallVlm", self._call_vlm_with_lifecycle),
+                OneShotActionNode("LoadGraspGen", self._ensure_graspgen_loaded),
+                OneShotActionNode("OctoHomeCloud", self._capture_octomap_home_cloud),
+                OneShotActionNode("ClearOctomap", self._clear_octomap),
+                OneShotActionNode("CallCaptureScanner", self._call_capture_scan),
+                WaitForGraspsNode(
+                    "WaitForScanInference",
+                    self._has_fresh_grasps,
+                    lambda: self.scan_wait_timeout_sec,
+                ),
+            ],
+        )
+
+    def _build_vlm_select_next_prepare_tree(self) -> BTNode:
+        planning_attempt_sequence = SequenceNode(
+            "GraspPlanningSequenceNext",
+            [
+                OneShotActionNode("CallGraspGen", self._call_grasp_generation),
+                WaitForGraspsNode(
+                    "WaitForFreshGrasps",
+                    self._has_fresh_grasps,
+                    lambda: self.grasp_wait_timeout_sec,
+                ),
+            ],
+        )
+        return SequenceNode(
+            "RootVlmSelectNextPrepareTree",
+            [
+                ConditionNode("JointStatesReady", self._has_valid_joint_state),
+                OneShotActionNode("EnsureHome", self._ensure_home),
+                ConditionNode("RobotAtHome", self._is_in_home),
+                OneShotActionNode("ClearPreviousGrasps", self._clear_grasp_cache_for_selection),
+                OneShotActionNode("CallVlmSelectNext", self._call_vlm_select_next_with_lifecycle),
+                OneShotActionNode("OctoHomeCloud", self._capture_octomap_home_cloud),
+                OneShotActionNode("ClearOctomap", self._clear_octomap),
+                RetryNode(
+                    "RetryPlanning",
+                    planning_attempt_sequence,
+                    max_attempts=self.max_retries,
+                    logger=self.get_logger(),
+                ),
+            ],
+        )
+
+    def _build_scan_vlm_select_next_prepare_tree(self) -> BTNode:
+        return SequenceNode(
+            "RootScanVlmSelectNextPrepareTree",
+            [
+                ConditionNode("JointStatesReady", self._has_valid_joint_state),
+                OneShotActionNode("EnsureHome", self._ensure_home),
+                ConditionNode("RobotAtHome", self._is_in_home),
+                OneShotActionNode("ClearPreviousGrasps", self._clear_grasp_cache_for_selection),
+                OneShotActionNode("CallVlmSelectNext", self._call_vlm_select_next_with_lifecycle),
                 OneShotActionNode("LoadGraspGen", self._ensure_graspgen_loaded),
                 OneShotActionNode("OctoHomeCloud", self._capture_octomap_home_cloud),
                 OneShotActionNode("ClearOctomap", self._clear_octomap),

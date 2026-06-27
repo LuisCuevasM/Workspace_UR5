@@ -1,0 +1,14 @@
+string instruction
+---
+bool success
+string selected_skill
+string executed_skill
+string service_name
+string object_name
+string target_location
+string stage
+string failure_type
+string message
+string query_response_json
+string decode_detail_json
+string raw_response_json

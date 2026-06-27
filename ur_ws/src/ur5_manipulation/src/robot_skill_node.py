@@ -4,8 +4,9 @@
 Expone los servicios del contrato `ROS2_INTERFACES.md` con tipo
 `ur5_manipulation/RunSkill`:
 
-    /robot/grasp       acercarse + cerrar gripper (sin levantar)
-    /robot/pick        grasp + levantar a retract
+    /robot/clean_table inicia el BT de limpiar mesa
+    /robot/grasp       aplica contexto VLM/SAM2 y genera grasps (sin mover brazo)
+    /robot/pick        va desde home al grasp cacheado y toma el objeto
     /robot/place       llevar el objeto ya agarrado al destino y soltar
     /robot/pick_place  pick + place
     /robot/push        declarada, NO implementada -> skill_not_available
@@ -13,10 +14,10 @@ Expone los servicios del contrato `ROS2_INTERFACES.md` con tipo
 
 Orquesta los servicios de bajo nivel existentes (todos std_srvs/Trigger):
 
-    grasp/pick prepare  -> /ur5/prepare_vlm_bt_grasp_cycle  (VLM + SAM2 + GraspGen)
-                           o, si la request llega SIN contexto VLM
-                           (vlm_context_json vacio o sin box),
-                           /ur5/prepare_bt_grasp_cycle (seleccion SAM2 sin VLM)
+    clean_table         -> /ur5/clean_table
+    grasp prepare       -> /ur5/prepare_context_bt_grasp_cycle si llega contexto VLM
+                           (box/puntos ya decididos por /ur5/query_instruction),
+                           o /ur5/prepare_bt_grasp_cycle si llega sin contexto.
     pick execute        -> /ur5/execute_pick
     place execute       -> /ur5/execute_place
     limpiar cache       -> /ur5/clear_grasp_cache
@@ -37,6 +38,7 @@ import json
 import time
 
 import threading
+from pathlib import Path
 
 import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -86,10 +88,13 @@ class RobotSkillNode(Node):
 
         # --- Servicios downstream ---
         self.prepare_service = self.declare_parameter(
-            "prepare_service", "/ur5/prepare_vlm_bt_grasp_cycle"
+            "prepare_service", "/ur5/prepare_context_bt_grasp_cycle"
         ).value
         self.prepare_no_vlm_service = self.declare_parameter(
             "prepare_no_vlm_service", "/ur5/prepare_bt_grasp_cycle"
+        ).value
+        self.clean_table_service = self.declare_parameter(
+            "clean_table_service", "/ur5/clean_table"
         ).value
         self.execute_pick_service = self.declare_parameter(
             "execute_pick_service", "/ur5/execute_pick"
@@ -102,6 +107,9 @@ class RobotSkillNode(Node):
         ).value
         self.sam_prompt_topic = self.declare_parameter(
             "sam_prompt_topic", "/sam2/vlm_prompt"
+        ).value
+        self.vlm_prompt_output_dir = self.declare_parameter(
+            "vlm_prompt_output_dir", "/tmp/vlm_prompt"
         ).value
         self.cam_info_topic = self.declare_parameter(
             "cam_info_topic", "/camera/camera/aligned_depth_to_color/camera_info"
@@ -142,6 +150,9 @@ class RobotSkillNode(Node):
         self.prepare_no_vlm_client = self.create_client(
             Trigger, self.prepare_no_vlm_service, callback_group=self.cb_group
         )
+        self.clean_table_client = self.create_client(
+            Trigger, self.clean_table_service, callback_group=self.cb_group
+        )
         self.pick_client = self.create_client(
             Trigger, self.execute_pick_service, callback_group=self.cb_group
         )
@@ -168,6 +179,7 @@ class RobotSkillNode(Node):
         )
 
         # --- Servicios expuestos ---
+        self._make_skill_service("/robot/clean_table", self._handle_clean_table)
         self._make_skill_service("/robot/grasp", self._handle_grasp)
         self._make_skill_service("/robot/pick", self._handle_pick)
         self._make_skill_service("/robot/place", self._handle_place)
@@ -176,7 +188,7 @@ class RobotSkillNode(Node):
         self._make_skill_service("/robot/handover", self._handle_unavailable)
 
         self.get_logger().info(
-            "robot_skill_node listo: /robot/grasp, /robot/pick, /robot/place, "
+            "robot_skill_node listo: /robot/clean_table, /robot/grasp, /robot/pick, /robot/place, "
             "/robot/pick_place, /robot/push (stub), /robot/handover (stub)"
         )
 
@@ -272,7 +284,7 @@ class RobotSkillNode(Node):
                 self.get_logger().info(msg)
 
     def _push_vlm_prompt(self, vlm_context_json):
-        """Publica el prompt VLM (box/puntos) a SAM2 en pixeles para re-segmentar."""
+        """Escribe/publica el prompt VLM (box/puntos) para que SAM2 lo aplique."""
         if not vlm_context_json:
             return False, "vlm_context_json vacio"
         try:
@@ -298,14 +310,29 @@ class RobotSkillNode(Node):
             labels.append(0)
 
         prompt = {
+            "target_object": ctx.get("name", ""),
+            "selected_safe_part": ctx.get("selected_safe_part", ""),
+            "forbidden_parts": ctx.get("forbidden_parts", []),
+            "force_level": ctx.get("force_level", ""),
+            "confidence": ctx.get("confidence", ""),
+            "reason": ctx.get("reason", ""),
+            "image_width": w,
+            "image_height": h,
+            "object_box_xyxy_norm": box,
+            "positive_points_xy_norm": ctx.get("positive_points_xy_norm", []) or [],
+            "negative_points_xy_norm": ctx.get("negative_points_xy_norm", []) or [],
             "box_xyxy": box_px,
             "point_coords": coords,
             "point_labels": labels,
-            "target_object": ctx.get("name", ""),
-            "selected_safe_part": ctx.get("selected_safe_part", ""),
         }
         self.prompt_pub.publish(String(data=json.dumps(prompt)))
-        return True, "prompt VLM publicado a SAM2"
+
+        output_dir = Path(self.vlm_prompt_output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        payload_path = output_dir / "sam2_vlm_prompt.json"
+        with open(payload_path, "w", encoding="utf-8") as f:
+            json.dump(prompt, f, indent=2, ensure_ascii=False)
+        return True, f"prompt VLM publicado y escrito en {payload_path}"
 
     @staticmethod
     def _mask_id_from_ctx(vlm_context_json):
@@ -330,12 +357,19 @@ class RobotSkillNode(Node):
     def _do_prepare(self, req, detail):
         """SAM2 + GraspGen. Devuelve (ok, failure_type, stage, message).
 
-        Con contexto VLM usa el ciclo VLM; sin el, el ciclo no-VLM
-        (seleccion SAM2 directa), para operar sin el servidor VLM.
+        Con contexto VLM usa el ciclo por contexto ya resuelto; sin el, usa el
+        ciclo no-VLM (seleccion SAM2 directa) para operar sin servidor VLM.
         """
         use_vlm = self._has_vlm_context(req)
-        detail["prepare_mode"] = "vlm" if use_vlm else "no_vlm"
+        detail["prepare_mode"] = "context" if use_vlm else "no_vlm"
         self._apply_flags(req, detail, use_vlm)
+        if use_vlm:
+            ok, msg = self._push_vlm_prompt(req.vlm_context_json)
+            detail["vlm_context_prompt"] = {"ok": ok, "message": msg}
+            self.get_logger().info(f"contexto VLM -> SAM2 -> {ok}: {msg}")
+            if not ok:
+                return False, "segmentation_failed", "segmentation", msg
+
         client, service_name = (
             (self.prepare_client, self.prepare_service)
             if use_vlm
@@ -368,6 +402,16 @@ class RobotSkillNode(Node):
     # ------------------------------------------------------------------
     # Skills
     # ------------------------------------------------------------------
+    def _handle_clean_table(self, req, response):
+        detail = {"skill": "clean_table", "attempt_number": req.attempt_number}
+        ok, ft, stage, _ = self._do_execute(
+            self.clean_table_client, self.clean_table_service, detail, "clean_table",
+            "execution_failed", "clean_table",
+        )
+        if not ok:
+            return self._respond(response, False, stage, ft, "", detail)
+        return self._respond(response, True, "done", "", "", detail)
+
     def _handle_grasp(self, req, response):
         detail = {"skill": "grasp", "attempt_number": req.attempt_number,
                   "object_name": req.object_name}
@@ -385,9 +429,17 @@ class RobotSkillNode(Node):
         mask_id = self._mask_id_from_ctx(req.vlm_context_json)
         grasp_id = f"grasp_{req.attempt_number}"
 
-        ok, ft, stage, _ = self._do_prepare(req, detail)
-        if not ok:
-            return self._respond(response, False, stage, ft, mask_id, detail, grasp_id)
+        if self._has_vlm_context(req):
+            ok, ft, stage, _ = self._do_prepare(req, detail)
+            if not ok:
+                return self._respond(response, False, stage, ft, mask_id, detail, grasp_id)
+        else:
+            if req.clear_cached_grasps or req.force_new_perception:
+                self._apply_flags(req, detail, use_vlm=False)
+            detail["prepare"] = {
+                "ok": True,
+                "message": "sin contexto VLM: usando grasp cacheado/preparado",
+            }
 
         ok, ft, stage, _ = self._do_execute(
             self.pick_client, self.execute_pick_service, detail, "execute_pick",

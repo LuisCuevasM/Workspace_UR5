@@ -13,13 +13,13 @@ def generate_launch_description():
 
     vlm_health_url_arg = DeclareLaunchArgument(
         "vlm_health_url",
-        default_value="http://172.17.0.2:8888/health",
+        default_value="http://192.168.1.110:8888/health",
         description="URL del endpoint /health del servidor VLM.",
     )
 
     vlm_release_url_arg = DeclareLaunchArgument(
         "vlm_release_url",
-        default_value="http://172.17.0.2:8888/release",
+        default_value="http://192.168.1.110:8888/release",
         description="URL del endpoint /release para liberar la GPU del modelo VLM.",
     )
 
@@ -63,6 +63,30 @@ def generate_launch_description():
         "max_retries",
         default_value="3",
         description="Cantidad maxima de reintentos del Behavior Tree.",
+    )
+
+    sam_selection_retries_arg = DeclareLaunchArgument(
+        "sam_selection_retries",
+        default_value="3",
+        description="Cantidad maxima de reintentos si falla la seleccion de objeto en SAM2.",
+    )
+
+    clean_table_max_cycles_arg = DeclareLaunchArgument(
+        "clean_table_max_cycles",
+        default_value="20",
+        description="Cantidad maxima de objetos/ciclos para el BT Limpiar la Mesa.",
+    )
+
+    clean_table_use_vlm_arg = DeclareLaunchArgument(
+        "clean_table_use_vlm",
+        default_value="true",
+        description="Usar seleccion VLM en el BT Limpiar la Mesa.",
+    )
+
+    clean_table_scan_on_no_grasps_arg = DeclareLaunchArgument(
+        "clean_table_scan_on_no_grasps",
+        default_value="true",
+        description="Usar scanner como recuperacion si no se generan grasps.",
     )
 
     max_grasps_to_try_arg = DeclareLaunchArgument(
@@ -221,11 +245,19 @@ def generate_launch_description():
                 "clear_grasp_cache_service_name": "/ur5/clear_grasp_cache",
                 "go_home_service_name": "/ur5/go_home",
                 "prepare_bt_service_name": "/ur5/prepare_bt_grasp_cycle",
+                "prepare_context_bt_service_name": "/ur5/prepare_context_bt_grasp_cycle",
                 "execute_bt_service_name": "/ur5/execute_bt_grasp_cycle",
                 "bt_service_name": "/ur5/run_bt_grasp_cycle",
+                "clean_table_service_name": "/ur5/clean_table",
+                "execute_pick_service_name": "/ur5/execute_pick",
+                "execute_place_service_name": "/ur5/execute_place",
+                "clean_table_max_cycles": LaunchConfiguration("clean_table_max_cycles"),
+                "clean_table_use_vlm": LaunchConfiguration("clean_table_use_vlm"),
+                "clean_table_scan_on_no_grasps": LaunchConfiguration("clean_table_scan_on_no_grasps"),
                 "scan_prepare_bt_service_name": "/ur5/prepare_scan_bt_grasp_cycle",
                 "top_grasps_topic": "/graspgen/top_grasps",
                 "max_retries": LaunchConfiguration("max_retries"),
+                "sam_selection_retries": LaunchConfiguration("sam_selection_retries"),
                 "service_wait_timeout_sec": 10.0,
                 "vlm_health_url": LaunchConfiguration("vlm_health_url"),
                 "vlm_release_url": LaunchConfiguration("vlm_release_url"),
@@ -250,6 +282,10 @@ def generate_launch_description():
             grasp_threshold_arg,
             num_grasps_arg,
             max_retries_arg,
+            sam_selection_retries_arg,
+            clean_table_max_cycles_arg,
+            clean_table_use_vlm_arg,
+            clean_table_scan_on_no_grasps_arg,
             max_grasps_to_try_arg,
             max_graspgen_retries_arg,
             collision_threshold_arg,
